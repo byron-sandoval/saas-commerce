@@ -1,0 +1,700 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      Usuario  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  accessToken           String?   @db.Text
+  refreshToken          String?   @db.Text
+  idToken               String?   @db.Text
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  // Hash de contrasena, nunca texto plano. Escribir mediante Better Auth.
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  user                  Usuario   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String   @db.Text
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@map("verification")
+}
+
+enum EstadoEmpresa {
+  ACTIVA
+  SUSPENDIDA
+  INACTIVA
+}
+
+enum EstadoSuscripcion {
+  PRUEBA
+  ACTIVA
+  VENCIDA
+  CANCELADA
+  SUSPENDIDA
+}
+
+enum TipoMovimiento {
+  COMPRA
+  VENTA
+  DEVOLUCION_CLIENTE
+  DEVOLUCION_PROVEEDOR
+  AJUSTE
+  TRANSFERENCIA
+}
+
+enum TipoDocumento {
+  CEDULA
+  PASAPORTE
+}
+
+enum MetodoPago {
+  EFECTIVO
+  TARJETA
+  TRANSFERENCIA
+  OTRO
+}
+
+enum EstadoVenta {
+  COMPLETADA
+  ANULADA
+}
+
+enum EstadoOrdenCompra {
+  BORRADOR
+  ENVIADA
+  CONFIRMADA
+  PARCIALMENTE_RECIBIDA
+  RECIBIDA
+  CANCELADA
+}
+
+enum EstadoCaja {
+  ABIERTA
+  CERRADA
+}
+
+enum TipoDevolucion {
+  CLIENTE
+  PROVEEDOR
+}
+
+enum EstadoDevolucion {
+  PENDIENTE
+  APROBADA
+  RECHAZADA
+  COMPLETADA
+}
+
+enum EstadoCredito {
+  PENDIENTE
+  PAGADO
+  VENCIDO
+  ANULADO
+}
+
+// Tipos de documento que se numeran con un contador por empresa.
+enum TipoSecuencia {
+  FACTURA
+  ORDEN_COMPRA
+}
+
+// Tipos de documento legal que el cliente debe aceptar.
+enum TipoDocumentoLegal {
+  TERMINOS
+  PRIVACIDAD
+  TRATAMIENTO_DATOS
+}
+
+// Acceso del propietario de la plataforma; aprovisionar solo desde un proceso seguro.
+model SuperAdmin {
+  id            String   @id @default(uuid())
+  usuarioId     String   @unique
+  usuario       Usuario  @relation(fields: [usuarioId], references: [id], onDelete: Restrict)
+  activo        Boolean  @default(true)
+  creadoEn      DateTime @default(now())
+  actualizadoEn DateTime @updatedAt
+}
+
+model LandingPage {
+  id            Int      @id @default(1)
+  titulo        String   @db.VarChar(180)
+  subtitulo     String?
+  whatsapp      String?  @db.VarChar(30)
+  banners       Json     @default("[]")
+  beneficios    Json     @default("[]")
+  preguntasFaq  Json     @default("[]")
+  actualizadoEn DateTime @updatedAt
+}
+
+// Versiones de terminos, privacidad y tratamiento de datos (global, no por empresa).
+// Nunca se editan ni se borran: una version nueva es un registro nuevo.
+model DocumentoLegal {
+  id           String             @id @default(uuid())
+  tipo         TipoDocumentoLegal
+  version      String             @db.VarChar(20)
+  contenido    String
+  vigenteDesde DateTime
+  activo       Boolean            @default(true)
+  creadoEn     DateTime           @default(now())
+
+  aceptaciones AceptacionLegal[]
+
+  @@unique([tipo, version])
+  @@index([tipo, activo])
+}
+
+// Constancia de quien acepto que version, cuando y desde donde.
+model AceptacionLegal {
+  id          String   @id @default(uuid())
+  documentoId String
+  empresaId   String
+  usuarioId   String?
+  aceptadoEn  DateTime @default(now())
+  ip          String?  @db.VarChar(45)
+  userAgent   String?  @db.VarChar(255)
+
+  documento DocumentoLegal @relation(fields: [documentoId], references: [id])
+  empresa   Empresa        @relation(fields: [empresaId], references: [id])
+  usuario   Usuario?       @relation(fields: [empresaId, usuarioId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@unique([empresaId, id])
+  @@index([empresaId])
+  @@index([usuarioId])
+  @@index([documentoId])
+}
+
+model Plan {
+  id             String        @id @default(uuid())
+  nombre         String        @unique @db.VarChar(80)
+  descripcion    String?
+  precioMensual  Decimal       @db.Decimal(12, 2)
+  limiteUsuarios Int?
+  activo         Boolean       @default(true)
+  creadoEn       DateTime      @default(now())
+  actualizadoEn  DateTime      @updatedAt
+  suscripciones  Suscripcion[]
+}
+
+model Empresa {
+  id            String        @id @default(uuid())
+  nombre        String        @db.VarChar(100)
+  ruc           String?       @db.VarChar(20)
+  regimenFiscal String?       @db.VarChar(80)
+  direccion     String        @db.VarChar(255)
+  telefono      String?       @db.VarChar(20)
+  correo        String?       @db.VarChar(100)
+  logoUrl       String?
+  eslogan       String?       @db.VarChar(150)
+  porcentajeIva Decimal       @default(15) @db.Decimal(5, 2)
+  estado        EstadoEmpresa @default(ACTIVA)
+  creadoEn      DateTime      @default(now())
+  actualizadoEn DateTime      @updatedAt
+
+  usuarios            Usuario[]
+  roles               Rol[]
+  categorias          Categoria[]
+  unidadesMedida      UnidadMedida[]
+  productos           Producto[]
+  proveedores         Proveedor[]
+  movimientos         MovimientoAlmacen[]
+  clientes            Cliente[]
+  ventas              Venta[]
+  ordenesCompra       OrdenCompra[]
+  devoluciones        Devolucion[]
+  sesionesCaja        SesionCaja[]
+  suscripciones       Suscripcion[]
+  creditos            Credito[]
+  abonos              Abono[]
+  secuencias          Secuencia[]
+  aceptacionesLegales AceptacionLegal[]
+
+  @@index([estado])
+}
+
+// Contador de documentos por empresa y tipo (facturas, ordenes de compra).
+// ultimoValor es el ultimo numero usado; el siguiente es ultimoValor + 1.
+model Secuencia {
+  id          String        @id @default(uuid())
+  empresaId   String
+  tipo        TipoSecuencia
+  prefijo     String        @default("") @db.VarChar(10)
+  ultimoValor Int           @default(0)
+
+  empresa Empresa @relation(fields: [empresaId], references: [id])
+
+  @@unique([empresaId, tipo])
+  @@unique([empresaId, id])
+}
+
+model Suscripcion {
+  id            String            @id @default(uuid())
+  empresaId     String
+  planId        String
+  estado        EstadoSuscripcion @default(PRUEBA)
+  fechaInicio   DateTime          @default(now())
+  fechaFin      DateTime?
+  precioPactado Decimal           @db.Decimal(12, 2)
+  creadoEn      DateTime          @default(now())
+  actualizadoEn DateTime          @updatedAt
+
+  empresa Empresa @relation(fields: [empresaId], references: [id])
+  plan    Plan    @relation(fields: [planId], references: [id])
+
+  @@unique([empresaId, id])
+  @@index([empresaId, estado])
+  @@index([planId])
+}
+
+model Rol {
+  id          String   @id @default(uuid())
+  empresaId   String
+  nombre      String   @db.VarChar(50)
+  descripcion String?
+  activo      Boolean  @default(true)
+  creadoEn    DateTime @default(now())
+
+  empresa  Empresa   @relation(fields: [empresaId], references: [id])
+  usuarios Usuario[]
+
+  @@unique([empresaId, nombre])
+  @@unique([empresaId, id])
+}
+
+model Usuario {
+  id                       String      @id @default(uuid())
+  nombre                   String
+  email                    String      @unique
+  emailVerified            Boolean     @default(false)
+  image                    String?
+  username                 String?     @unique
+  displayUsername          String?
+  sessions                 Session[]
+  accounts                 Account[]
+  superAdmin               SuperAdmin?
+  empresaId                String?
+  rolId                    String?
+  debeCambiarPassword      Boolean     @default(false)
+  passwordTemporalExpiraEn DateTime?
+  activo                   Boolean     @default(true)
+  creadoEn                 DateTime    @default(now())
+  actualizadoEn            DateTime    @updatedAt
+
+  empresa             Empresa?            @relation(fields: [empresaId], references: [id])
+  rol                 Rol?                @relation(fields: [empresaId, rolId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  ventas              Venta[]
+  aperturasCaja       SesionCaja[]        @relation("CajaAbiertaPor")
+  cierresCaja         SesionCaja[]        @relation("CajaCerradaPor")
+  ordenesCompra       OrdenCompra[]       @relation("OrdenCreadaPor")
+  ordenesAprobadas    OrdenCompra[]       @relation("OrdenAprobadaPor")
+  movimientos         MovimientoAlmacen[]
+  devoluciones        Devolucion[]
+  abonos              Abono[]
+  aceptacionesLegales AceptacionLegal[]
+
+  @@unique([empresaId, id])
+  @@index([empresaId, rolId])
+}
+
+model Categoria {
+  id          String   @id @default(uuid())
+  empresaId   String
+  nombre      String   @db.VarChar(100)
+  padreId     String?
+  descripcion String?
+  imagenUrl   String?
+  activo      Boolean  @default(true)
+  orden       Int      @default(0)
+  creadoEn    DateTime @default(now())
+
+  empresa   Empresa     @relation(fields: [empresaId], references: [id])
+  padre     Categoria?  @relation("ArbolCategorias", fields: [empresaId, padreId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  hijos     Categoria[] @relation("ArbolCategorias")
+  productos Producto[]
+
+  @@unique([empresaId, id])
+  @@index([empresaId, nombre])
+  @@index([padreId])
+}
+
+model UnidadMedida {
+  id        String   @id @default(uuid())
+  empresaId String
+  nombre    String   @db.VarChar(60)
+  simbolo   String   @db.VarChar(20)
+  activo    Boolean  @default(true)
+  creadoEn  DateTime @default(now())
+
+  empresa   Empresa    @relation(fields: [empresaId], references: [id])
+  productos Producto[]
+
+  @@unique([empresaId, nombre])
+  @@unique([empresaId, id])
+}
+
+model Producto {
+  id                  String   @id @default(uuid())
+  empresaId           String
+  sku                 String   @db.VarChar(60)
+  nombre              String   @db.VarChar(150)
+  descripcion         String?
+  categoriaId         String?
+  codigoBarras        String?  @db.VarChar(100)
+  unidadMedidaId      String?
+  precioCosto         Decimal  @default(0) @db.Decimal(12, 2)
+  precioBase          Decimal  @db.Decimal(12, 2)
+  precioOferta        Decimal? @db.Decimal(12, 2)
+  precioMayorista     Decimal? @db.Decimal(12, 2)
+  cantMinimaMayorista Decimal  @default(0) @db.Decimal(14, 3)
+  imagenesUrl         String[] @default([])
+  activo              Boolean  @default(true)
+  nivelStockMinimo    Decimal  @default(0) @db.Decimal(14, 3)
+  nivelStockMaximo    Decimal? @db.Decimal(14, 3)
+  creadoEn            DateTime @default(now())
+  actualizadoEn       DateTime @updatedAt
+
+  empresa            Empresa             @relation(fields: [empresaId], references: [id])
+  categoria          Categoria?          @relation(fields: [empresaId, categoriaId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  unidadMedida       UnidadMedida?       @relation(fields: [empresaId, unidadMedidaId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  movimientos        MovimientoAlmacen[]
+  detallesVenta      DetalleVenta[]
+  itemsOrdenCompra   ItemOrdenCompra[]
+  detallesDevolucion DetalleDevolucion[]
+
+  @@unique([empresaId, sku])
+  @@unique([empresaId, codigoBarras])
+  @@unique([empresaId, id])
+  @@index([empresaId, categoriaId])
+  @@index([empresaId, activo])
+}
+
+model Proveedor {
+  id                   String   @id @default(uuid())
+  empresaId            String
+  nombre               String   @db.VarChar(150)
+  telefono             String?
+  email                String?
+  direccion            String?
+  identificacionFiscal String?
+  activo               Boolean  @default(true)
+  notas                String?
+  creadoEn             DateTime @default(now())
+  actualizadoEn        DateTime @updatedAt
+
+  empresa       Empresa             @relation(fields: [empresaId], references: [id])
+  movimientos   MovimientoAlmacen[]
+  ordenesCompra OrdenCompra[]
+  devoluciones  Devolucion[]
+
+  @@unique([empresaId, id])
+  @@index([empresaId, nombre])
+}
+
+model Cliente {
+  id              String         @id @default(uuid())
+  empresaId       String
+  nombre          String         @db.VarChar(50)
+  tipoDocumento   TipoDocumento?
+  numeroDocumento String?        @db.VarChar(20)
+  direccion       String?        @db.VarChar(150)
+  telefono        String?        @db.VarChar(15)
+  activo          Boolean        @default(true)
+  esGenerico      Boolean        @default(false)
+  creadoEn        DateTime       @default(now())
+  actualizadoEn   DateTime       @updatedAt
+
+  empresa  Empresa   @relation(fields: [empresaId], references: [id])
+  ventas   Venta[]
+  creditos Credito[]
+
+  @@unique([empresaId, tipoDocumento, numeroDocumento])
+  @@unique([empresaId, id])
+  @@index([empresaId, nombre])
+}
+
+model SesionCaja {
+  id               String     @id @default(uuid())
+  empresaId        String
+  estado           EstadoCaja @default(ABIERTA)
+  abiertoPorId     String
+  cerradoPorId     String?
+  abiertoEn        DateTime   @default(now())
+  cerradoEn        DateTime?
+  efectivoInicial  Decimal    @default(0) @db.Decimal(14, 2)
+  efectivoCierre   Decimal?   @db.Decimal(14, 2)
+  efectivoEsperado Decimal?   @db.Decimal(14, 2)
+  diferencia       Decimal?   @db.Decimal(14, 2)
+  totalVentas      Decimal    @default(0) @db.Decimal(14, 2)
+  totalEfectivo    Decimal    @default(0) @db.Decimal(14, 2)
+  totalTarjeta     Decimal    @default(0) @db.Decimal(14, 2)
+  totalTransfer    Decimal    @default(0) @db.Decimal(14, 2)
+  cantidadVentas   Int        @default(0)
+  notas            String?
+
+  empresa    Empresa  @relation(fields: [empresaId], references: [id])
+  abiertoPor Usuario  @relation("CajaAbiertaPor", fields: [empresaId, abiertoPorId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  cerradoPor Usuario? @relation("CajaCerradaPor", fields: [empresaId, cerradoPorId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  ventas     Venta[]
+
+  @@unique([empresaId, id])
+  @@index([empresaId, estado])
+}
+
+model Venta {
+  id              String      @id @default(uuid())
+  empresaId       String
+  sesionCajaId    String
+  numeroFactura   String      @db.VarChar(50)
+  clienteId       String
+  subtotal        Decimal     @db.Decimal(14, 2)
+  montoDescuento  Decimal     @default(0) @db.Decimal(14, 2)
+  montoIVA        Decimal     @default(0) @db.Decimal(14, 2)
+  total           Decimal     @db.Decimal(14, 2)
+  metodoPago      MetodoPago  @default(EFECTIVO)
+  referenciaPago  String?     @db.VarChar(100)
+  importeRecibido Decimal?    @db.Decimal(14, 2)
+  cambio          Decimal?    @db.Decimal(14, 2)
+  estado          EstadoVenta @default(COMPLETADA)
+  usuarioId       String
+  creadoEn        DateTime    @default(now())
+  actualizadoEn   DateTime    @updatedAt
+
+  empresa      Empresa             @relation(fields: [empresaId], references: [id])
+  sesionCaja   SesionCaja          @relation(fields: [empresaId, sesionCajaId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  cliente      Cliente             @relation(fields: [empresaId, clienteId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  usuario      Usuario             @relation(fields: [empresaId, usuarioId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  detalles     DetalleVenta[]
+  movimientos  MovimientoAlmacen[]
+  devoluciones Devolucion[]
+  credito      Credito?
+
+  @@unique([empresaId, numeroFactura])
+  @@unique([empresaId, id])
+  @@unique([empresaId, clienteId, id])
+  @@index([empresaId, creadoEn])
+  @@index([sesionCajaId])
+  @@index([clienteId])
+}
+
+model DetalleVenta {
+  empresaId      String
+  id             String  @id @default(uuid())
+  ventaId        String
+  productoId     String
+  cantidad       Decimal @db.Decimal(14, 3)
+  precioUnitario Decimal @db.Decimal(12, 2)
+  costoEnVenta   Decimal @default(0) @db.Decimal(12, 2)
+  subtotal       Decimal @db.Decimal(14, 2)
+
+  venta    Venta    @relation(fields: [empresaId, ventaId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  producto Producto @relation(fields: [empresaId, productoId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@unique([empresaId, id])
+  @@index([ventaId])
+  @@index([productoId])
+}
+
+model OrdenCompra {
+  id              String            @id @default(uuid())
+  empresaId       String
+  numeroOrden     String            @db.VarChar(50)
+  proveedorId     String
+  estado          EstadoOrdenCompra @default(BORRADOR)
+  fechaEntregaEst DateTime?
+  nota            String?
+  usuarioId       String
+  aprobadoPorId   String?
+  creadoEn        DateTime          @default(now())
+  actualizadoEn   DateTime          @updatedAt
+
+  empresa     Empresa           @relation(fields: [empresaId], references: [id])
+  proveedor   Proveedor         @relation(fields: [empresaId, proveedorId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  usuario     Usuario           @relation("OrdenCreadaPor", fields: [empresaId, usuarioId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  aprobadoPor Usuario?          @relation("OrdenAprobadaPor", fields: [empresaId, aprobadoPorId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  items       ItemOrdenCompra[]
+
+  @@unique([empresaId, numeroOrden])
+  @@unique([empresaId, id])
+  @@index([empresaId, estado])
+  @@index([proveedorId])
+}
+
+model ItemOrdenCompra {
+  empresaId          String
+  id                 String  @id @default(uuid())
+  ordenCompraId      String
+  productoId         String
+  cantidadSolicitada Decimal @db.Decimal(14, 3)
+  cantidadRecibida   Decimal @default(0) @db.Decimal(14, 3)
+  costoUnitario      Decimal @db.Decimal(12, 2)
+  nota               String?
+
+  ordenCompra OrdenCompra @relation(fields: [empresaId, ordenCompraId], references: [empresaId, id], onDelete: Cascade, onUpdate: NoAction)
+  producto    Producto    @relation(fields: [empresaId, productoId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@unique([empresaId, id])
+  @@index([ordenCompraId])
+  @@index([productoId])
+}
+
+model MovimientoAlmacen {
+  id           String         @id @default(uuid())
+  empresaId    String
+  productoId   String
+  tipo         TipoMovimiento
+  cantidad     Decimal        @db.Decimal(14, 3)
+  costoUnidad  Decimal?       @db.Decimal(12, 2)
+  proveedorId  String?
+  ventaId      String?
+  devolucionId String?
+  nota         String?
+  usuarioId    String
+  creadoEn     DateTime       @default(now())
+
+  empresa    Empresa     @relation(fields: [empresaId], references: [id])
+  producto   Producto    @relation(fields: [empresaId, productoId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  proveedor  Proveedor?  @relation(fields: [empresaId, proveedorId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  venta      Venta?      @relation(fields: [empresaId, ventaId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  devolucion Devolucion? @relation(fields: [empresaId, devolucionId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  usuario    Usuario     @relation(fields: [empresaId, usuarioId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@unique([empresaId, id])
+  @@index([empresaId, productoId, creadoEn])
+  @@index([empresaId, tipo])
+  @@index([ventaId])
+}
+
+model Devolucion {
+  id            String           @id @default(uuid())
+  empresaId     String
+  tipo          TipoDevolucion
+  ventaId       String?
+  proveedorId   String?
+  motivo        String?
+  estado        EstadoDevolucion @default(PENDIENTE)
+  usuarioId     String
+  creadoEn      DateTime         @default(now())
+  actualizadoEn DateTime         @updatedAt
+
+  empresa     Empresa             @relation(fields: [empresaId], references: [id])
+  venta       Venta?              @relation(fields: [empresaId, ventaId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  proveedor   Proveedor?          @relation(fields: [empresaId, proveedorId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  usuario     Usuario             @relation(fields: [empresaId, usuarioId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  detalles    DetalleDevolucion[]
+  movimientos MovimientoAlmacen[]
+
+  @@unique([empresaId, id])
+  @@index([empresaId, estado])
+  @@index([ventaId])
+}
+
+model DetalleDevolucion {
+  empresaId       String
+  id              String  @id @default(uuid())
+  devolucionId    String
+  productoId      String
+  cantidad        Decimal @db.Decimal(14, 3)
+  motivo          String?
+  estadoProducto  String  @db.VarChar(60)
+  reintegrarStock Boolean @default(false)
+
+  devolucion Devolucion @relation(fields: [empresaId, devolucionId], references: [empresaId, id], onDelete: Cascade, onUpdate: NoAction)
+  producto   Producto   @relation(fields: [empresaId, productoId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@unique([empresaId, id])
+  @@index([devolucionId])
+  @@index([productoId])
+}
+
+// Creditos otorgados a clientes por ventas a plazo.
+model Credito {
+  id               String        @id @default(uuid())
+  empresaId        String
+  clienteId        String
+  ventaId          String?       @unique
+  fechaCredito     DateTime      @default(now())
+  fechaVencimiento DateTime?
+  montoOriginal    Decimal       @db.Decimal(14, 2)
+  saldoPendiente   Decimal       @db.Decimal(14, 2)
+  estado           EstadoCredito @default(PENDIENTE)
+  descripcion      String?       @db.VarChar(400)
+  creadoEn         DateTime      @default(now())
+  actualizadoEn    DateTime      @updatedAt
+
+  empresa Empresa @relation(fields: [empresaId], references: [id])
+  cliente Cliente @relation(fields: [empresaId, clienteId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  // El credito solo puede vincularse a una venta del mismo cliente y empresa.
+  venta   Venta?  @relation(fields: [empresaId, clienteId, ventaId], references: [empresaId, clienteId, id], onDelete: Restrict, onUpdate: NoAction)
+  abonos  Abono[]
+
+  @@unique([empresaId, id])
+  @@unique([empresaId, ventaId])
+  @@unique([empresaId, clienteId, ventaId])
+  @@index([empresaId, estado])
+  @@index([clienteId])
+  @@index([fechaVencimiento])
+}
+
+// Cada pago parcial o total aplicado a un credito.
+model Abono {
+  id             String     @id @default(uuid())
+  empresaId      String
+  creditoId      String
+  usuarioId      String
+  fecha          DateTime   @default(now())
+  monto          Decimal    @db.Decimal(14, 2)
+  saldoAnterior  Decimal    @db.Decimal(14, 2)
+  saldoNuevo     Decimal    @db.Decimal(14, 2)
+  metodoPago     MetodoPago @default(EFECTIVO)
+  referenciaPago String?    @db.VarChar(100)
+  descripcion    String?    @db.VarChar(400)
+
+  empresa Empresa @relation(fields: [empresaId], references: [id])
+  credito Credito @relation(fields: [empresaId, creditoId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  usuario Usuario @relation(fields: [empresaId, usuarioId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+
+  @@unique([empresaId, id])
+  @@index([empresaId, fecha])
+  @@index([creditoId])
+}
