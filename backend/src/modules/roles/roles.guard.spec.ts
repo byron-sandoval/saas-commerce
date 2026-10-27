@@ -63,15 +63,18 @@ describe('Permisos de catalogo', () => {
     },
   );
 
-  it('rechaza al cajero aunque envie ADMIN en una cabecera', async () => {
-    const prueba = preparar('create');
-    const usuario = usuarioActivo();
-    usuario.rol.nombre = 'CAJERO';
-    prueba.findUnique.mockResolvedValue(usuario);
-    await expect(
-      prueba.guard.canActivate(prueba.context),
-    ).rejects.toBeInstanceOf(ForbiddenException);
-  });
+  it.each(['CAJERO', 'BODEGUERO'])(
+    'rechaza crear productos a %s aunque envie ADMIN en una cabecera',
+    async (nombre) => {
+      const prueba = preparar('create');
+      const usuario = usuarioActivo();
+      usuario.rol.nombre = nombre;
+      prueba.findUnique.mockResolvedValue(usuario);
+      await expect(
+        prueba.guard.canActivate(prueba.context),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    },
+  );
 
   it.each(['ADMIN', 'BODEGUERO', 'CAJERO'])(
     'eliminar: solo ADMIN tiene acceso, se verifica %s',
