@@ -1,9 +1,23 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  Delete,
+  UseGuards,
+} from '@nestjs/common';
 import { CajaService } from './caja.service.js';
 import { CreateCajaDto } from './dto/create-caja.dto.js';
 import { UpdateCajaDto } from './dto/update-caja.dto.js';
 
+import { Roles } from '../roles/roles.decorator.js';
+import { RolesGuard } from '../roles/roles.guard.js';
+
 @Controller('caja')
+@UseGuards(RolesGuard)
+@Roles('ADMIN', 'CAJERO')
 export class CajaController {
   constructor(private readonly cajaService: CajaService) {}
 
@@ -28,6 +42,7 @@ export class CajaController {
   }
 
   @Delete(':id')
+  @Roles('ADMIN')
   remove(@Param('id') id: string) {
     return this.cajaService.remove(+id);
   }
