@@ -7,9 +7,10 @@ import { CategoriasController } from './categorias.controller.js';
 import { CategoriasService } from './categorias.service.js';
 import { UnidadesMedidaController } from './unidades-medida.controller.js';
 import { UnidadesMedidaService } from './unidades-medida.service.js';
+import { InventarioModule } from '../inventario/inventario.module.js';
 
 @Module({
-  imports: [RolesModule, PrismaModule],
+  imports: [RolesModule, PrismaModule, InventarioModule],
   controllers: [
     CatalogoController,
     CategoriasController,

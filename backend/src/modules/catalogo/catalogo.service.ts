@@ -9,10 +9,14 @@ import { PrismaService } from '../../prisma/prisma.service.js';
 import type { CreateCatalogoDto } from './dto/create-catalogo.dto.js';
 import type { UpdateCatalogoDto } from './dto/update-catalogo.dto.js';
 import type { ListarProductosDto } from './dto/listar-productos.dto.js';
+import { InventarioService } from '../inventario/inventario.service.js';
 
 @Injectable()
 export class CatalogoService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly inventarioService: InventarioService,
+  ) {}
 
   async create(empresaId: string, dto: CreateCatalogoDto) {
     try {
@@ -41,7 +45,11 @@ export class CatalogoService {
       skip: (pagina - 1) * limite,
       take: limite,
     });
-    return { datos, pagina, limite };
+    return {
+      datos: await this.inventarioService.agregarExistencias(empresaId, datos),
+      pagina,
+      limite,
+    };
   }
 
   async findOne(empresaId: string, id: string) {
@@ -49,7 +57,10 @@ export class CatalogoService {
       where: { empresaId_id: { empresaId, id }, activo: true },
     });
     if (!producto) throw new NotFoundException('Producto no encontrado.');
-    return producto;
+    const [datos] = await this.inventarioService.agregarExistencias(empresaId, [
+      producto,
+    ]);
+    return datos;
   }
 
   async update(empresaId: string, id: string, dto: UpdateCatalogoDto) {
