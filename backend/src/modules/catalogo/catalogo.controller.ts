@@ -22,7 +22,7 @@ import { ListarProductosDto } from './dto/listar-productos.dto.js';
 
 @Controller('catalogo/productos')
 @UseGuards(RolesGuard)
-@Roles('ADMIN', 'BODEGUERO')
+@Roles('ADMIN')
 export class CatalogoController {
   constructor(private readonly catalogoService: CatalogoService) {}
 
