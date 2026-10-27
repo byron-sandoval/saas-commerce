@@ -98,9 +98,64 @@ function baseSimulada() {
     },
     categoria: {
       findUnique: vi.fn(async ({ where }: Row) => buscar('categorias', where)),
+      create: vi.fn(async ({ data }: Row) => {
+        const row = { id: randomUUID(), activo: true, ...limpiar(data) };
+        state.categorias.push(row);
+        return row;
+      }),
+      findMany: vi.fn(async ({ where, skip, take }: Row) =>
+        state.categorias
+          .filter((row) =>
+            Object.entries(where).every(([key, value]) => row[key] === value),
+          )
+          .slice(skip, skip + take),
+      ),
+      update: vi.fn(async ({ where, data }: Row) => {
+        const row = buscar('categorias', where);
+        if (!row) throw error('P2025');
+        Object.assign(row, limpiar(data));
+        return row;
+      }),
     },
     unidadMedida: {
       findUnique: vi.fn(async ({ where }: Row) => buscar('unidades', where)),
+      create: vi.fn(async ({ data }: Row) => {
+        if (
+          state.unidades.some(
+            (row) =>
+              row.empresaId === data.empresaId && row.nombre === data.nombre,
+          )
+        ) {
+          throw error('P2002');
+        }
+        const row = { id: randomUUID(), activo: true, ...limpiar(data) };
+        state.unidades.push(row);
+        return row;
+      }),
+      findMany: vi.fn(async ({ where, skip, take }: Row) =>
+        state.unidades
+          .filter((row) =>
+            Object.entries(where).every(([key, value]) => row[key] === value),
+          )
+          .slice(skip, skip + take),
+      ),
+      update: vi.fn(async ({ where, data }: Row) => {
+        const row = buscar('unidades', where);
+        if (!row) throw error('P2025');
+        if (
+          data.nombre !== undefined &&
+          state.unidades.some(
+            (otra) =>
+              otra.id !== row.id &&
+              otra.empresaId === row.empresaId &&
+              otra.nombre === data.nombre,
+          )
+        ) {
+          throw error('P2002');
+        }
+        Object.assign(row, limpiar(data));
+        return row;
+      }),
     },
     producto: {
       create: vi.fn(async ({ data }: Row) => {
@@ -213,6 +268,297 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
       .expect(201);
     return response.body;
   }
+
+  it('valida categorias, aisla empresas y conserva productos al dar de baja', async () => {
+    const rutaCategorias = '/catalogo/categorias';
+    await request(app.getHttpServer()).get(rutaCategorias).expect(401);
+    const empresa = await crearEmpresa();
+    const otraEmpresa = await crearEmpresa('usuario-2');
+    for (const body of [
+      { nombre: '   ' },
+      { nombre: null },
+      { nombre: 'a'.repeat(101) },
+      { nombre: 'Herramientas', empresaId: otraEmpresa.id },
+    ]) {
+      await request(app.getHttpServer())
+        .post(rutaCategorias)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send(body)
+        .expect(400);
+    }
+    const crear = await request(app.getHttpServer())
+      .post(rutaCategorias)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ nombre: ' Herramientas ', descripcion: 'Manuales' })
+      .expect(201);
+    const id = crear.body.id;
+    expect(crear.body.nombre).toBe('Herramientas');
+    expect(crear.body.empresaId).toBe(empresa.id);
+    const lista = await request(app.getHttpServer())
+      .get(rutaCategorias)
+      .set('x-usuario-prueba', 'usuario-2')
+      .expect(200);
+    expect(lista.body.datos).toEqual([]);
+    await request(app.getHttpServer())
+      .get(`${rutaCategorias}/${id}`)
+      .set('x-usuario-prueba', 'usuario-2')
+      .expect(404);
+    await request(app.getHttpServer())
+      .patch(`${rutaCategorias}/${id}`)
+      .set('x-usuario-prueba', 'usuario-2')
+      .send({ nombre: 'Ajena' })
+      .expect(404);
+    await request(app.getHttpServer())
+      .delete(`${rutaCategorias}/${id}`)
+      .set('x-usuario-prueba', 'usuario-2')
+      .expect(404);
+    await request(app.getHttpServer())
+      .get(`${rutaCategorias}/invalido`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(400);
+    await request(app.getHttpServer())
+      .get(`${rutaCategorias}?limite=101`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(400);
+    await request(app.getHttpServer())
+      .patch(`${rutaCategorias}/${id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ nombre: null })
+      .expect(400);
+    await request(app.getHttpServer())
+      .patch(`${rutaCategorias}/${id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ nombre: 'Herramientas manuales', descripcion: null })
+      .expect(200);
+    const productoCreado = await request(app.getHttpServer())
+      .post(ruta)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ ...producto, categoriaId: id })
+      .expect(201);
+    await request(app.getHttpServer())
+      .delete(`${rutaCategorias}/${id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(204);
+    expect(fixture.estado().categorias[0].activo).toBe(false);
+    await request(app.getHttpServer())
+      .get(`${ruta}/${productoCreado.body.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    const activas = await request(app.getHttpServer())
+      .get(rutaCategorias)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(activas.body.datos).toEqual([]);
+    await request(app.getHttpServer())
+      .get(`${rutaCategorias}/${id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(404);
+    await request(app.getHttpServer())
+      .post(ruta)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ ...producto, sku: 'OTRO', categoriaId: id })
+      .expect(400);
+  });
+
+  it.each(['CAJERO', 'BODEGUERO'])(
+    'aplica permisos de categorias para %s',
+    async (nombre) => {
+      const empresa = await crearEmpresa();
+      const rutaCategorias = '/catalogo/categorias';
+      const crear = await request(app.getHttpServer())
+        .post(rutaCategorias)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ nombre: 'Herramientas' })
+        .expect(201);
+      fixture.estado().usuarios[0].rolId = empresa.roles.find(
+        (rol: Row) => rol.nombre === nombre,
+      ).id;
+      await request(app.getHttpServer())
+        .get(rutaCategorias)
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(200);
+      await request(app.getHttpServer())
+        .get(`${rutaCategorias}/${crear.body.id}`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(200);
+      await request(app.getHttpServer())
+        .post(rutaCategorias)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ nombre: 'Pinturas' })
+        .expect(403);
+      expect(fixture.estado().categorias).toHaveLength(1);
+      await request(app.getHttpServer())
+        .patch(`${rutaCategorias}/${crear.body.id}`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ nombre: 'Otra' })
+        .expect(403);
+      await request(app.getHttpServer())
+        .delete(`${rutaCategorias}/${crear.body.id}`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(403);
+    },
+  );
+
+  it('valida unidades, limita duplicados por empresa y conserva productos al dar de baja', async () => {
+    await crearEmpresa();
+    await crearEmpresa('usuario-2');
+    const base = '/catalogo/unidades-medida';
+    const http = request(app.getHttpServer());
+    const unidad = { nombre: 'Kilogramo', simbolo: 'kg' };
+    await http.get(base).expect(401);
+    for (const body of [
+      { nombre: '   ', simbolo: 'kg' },
+      { nombre: null, simbolo: 'kg' },
+      { nombre: 'Kilogramo' },
+      { ...unidad, simbolo: ' ' },
+      { ...unidad, nombre: 'x'.repeat(61) },
+      { ...unidad, simbolo: 'x'.repeat(21) },
+      { ...unidad, empresaId: 'ajena' },
+    ]) {
+      await http
+        .post(base)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send(body)
+        .expect(400);
+    }
+    const creada = await http
+      .post(base)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ nombre: ' Kilogramo ', simbolo: ' kg ' })
+      .expect(201);
+    const id = creada.body.id;
+    expect(creada.body.nombre).toBe('Kilogramo');
+    expect(creada.body.simbolo).toBe('kg');
+    await http
+      .post(base)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(unidad)
+      .expect(409);
+    await http
+      .post(base)
+      .set('x-usuario-prueba', 'usuario-2')
+      .send(unidad)
+      .expect(201);
+    for (const method of ['get', 'patch', 'delete'] as const) {
+      const req = http[method](`${base}/${id}`).set(
+        'x-usuario-prueba',
+        'usuario-2',
+      );
+      if (method === 'patch') req.send({ simbolo: 'otro' });
+      await req.expect(404);
+    }
+    const lista = await http
+      .get(`${base}?pagina=1&limite=1`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(lista.body.datos.map((row: Row) => row.id)).toEqual([id]);
+    await http
+      .get(`${base}?limite=0`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(400);
+    await http
+      .get(`${base}/invalido`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(400);
+    await http
+      .patch(`${base}/${id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ simbolo: null })
+      .expect(400);
+    await http
+      .patch(`${base}/${id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ simbolo: 'KG' })
+      .expect(200);
+    const otra = await http
+      .post(base)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ nombre: 'Metro', simbolo: 'm' })
+      .expect(201);
+    await http
+      .patch(`${base}/${otra.body.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ nombre: 'Kilogramo' })
+      .expect(409);
+    const creado = await http
+      .post(ruta)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ ...producto, unidadMedidaId: id })
+      .expect(201);
+    await http
+      .delete(`${base}/${id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(204);
+    expect(fixture.estado().unidades.find((row) => row.id === id)?.activo).toBe(
+      false,
+    );
+    await http
+      .get(`${base}/${id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(404);
+    await http
+      .patch(`${base}/${id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ simbolo: 'kg' })
+      .expect(404);
+    await http
+      .get(`${ruta}/${creado.body.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    const activas = await http
+      .get(base)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(activas.body.datos.map((row: Row) => row.id)).toEqual([
+      otra.body.id,
+    ]);
+    await http
+      .post(ruta)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ ...producto, sku: 'OTRO', unidadMedidaId: id })
+      .expect(400);
+  });
+
+  it.each(['CAJERO', 'BODEGUERO'])(
+    'restringe unidades de medida a consulta para %s',
+    async (nombre) => {
+      const empresa = await crearEmpresa();
+      const base = '/catalogo/unidades-medida';
+      const http = request(app.getHttpServer());
+      const crear = await http
+        .post(base)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ nombre: 'Litro', simbolo: 'L' })
+        .expect(201);
+      fixture.estado().usuarios[0].rolId = empresa.roles.find(
+        (rol: Row) => rol.nombre === nombre,
+      ).id;
+      await http.get(base).set('x-usuario-prueba', 'usuario-1').expect(200);
+      await http
+        .get(`${base}/${crear.body.id}`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(200);
+      await http
+        .post(base)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ nombre: 'Metro', simbolo: 'm' })
+        .expect(403);
+      await http
+        .patch(`${base}/${crear.body.id}`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ simbolo: 'l' })
+        .expect(403);
+      await http
+        .delete(`${base}/${crear.body.id}`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(403);
+      expect(fixture.estado().unidades).toHaveLength(1);
+      expect(fixture.estado().unidades[0]).toMatchObject({
+        simbolo: 'L',
+        activo: true,
+      });
+    },
+  );
 
   it('exige sesion para crear empresa o consultar productos', async () => {
     await request(app.getHttpServer())
@@ -332,7 +678,8 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
         .post(ruta)
         .set('x-usuario-prueba', 'usuario-1')
         .send({ ...producto, sku: 'OTRO' })
-        .expect(nombre === 'CAJERO' ? 403 : 201);
+        .expect(403);
+      expect(fixture.estado().productos).toHaveLength(1);
       await request(app.getHttpServer())
         .patch(`${ruta}/${crear.body.id}`)
         .set('x-usuario-prueba', 'usuario-1')
