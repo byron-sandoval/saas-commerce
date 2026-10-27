@@ -1,13 +1,12 @@
 import { Module } from '@nestjs/common';
 import { CatalogoService } from './catalogo.service.js';
 import { CatalogoController } from './catalogo.controller.js';
-import { AuthModule } from '../auth/auth.module.js';
+import { RolesModule } from '../roles/roles.module.js';
 import { PrismaModule } from '../../prisma/prisma.module.js';
-import { RolesGuard } from '../roles/roles.guard.js';
 
 @Module({
-  imports: [AuthModule, PrismaModule],
+  imports: [RolesModule, PrismaModule],
   controllers: [CatalogoController],
-  providers: [CatalogoService, RolesGuard],
+  providers: [CatalogoService],
 })
 export class CatalogoModule {}
