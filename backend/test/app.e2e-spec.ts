@@ -1,4 +1,4 @@
-// Pruebas HTTP con la aplicacion compilada y almacenamiento simulado.
+// Pruebas HTTP con el codigo fuente y almacenamiento simulado.
 // No conectan ni escriben en Neon. Ejecutar npm run test:e2e.
 import 'reflect-metadata';
 import { randomUUID } from 'node:crypto';
@@ -6,10 +6,10 @@ import { Test } from '@nestjs/testing';
 import { ValidationPipe } from '@nestjs/common';
 import type { INestApplication } from '@nestjs/common';
 import request from 'supertest';
-import { AppModule } from '../dist/app.module.js';
-import { PrismaService } from '../dist/prisma/prisma.service.js';
-import { AuthService } from '../dist/modules/auth/auth.service.js';
-import { Prisma } from '../dist/generated/prisma/client.js';
+import { AppModule } from '../src/app.module.js';
+import { PrismaService } from '../src/prisma/prisma.service.js';
+import { AuthService } from '../src/modules/auth/auth.service.js';
+import { Prisma } from '../src/generated/prisma/client.js';
 
 type Row = Record<string, any>;
 
@@ -376,6 +376,82 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
       .send(producto)
       .expect(201);
   });
+
+  it.each([
+    {
+      modulo: 'usuarios',
+      leer: ['ADMIN'],
+      crear: ['ADMIN'],
+      editar: ['ADMIN'],
+    },
+    {
+      modulo: 'inventario',
+      leer: ['ADMIN', 'BODEGUERO'],
+      crear: ['ADMIN', 'BODEGUERO'],
+      editar: ['ADMIN'],
+    },
+    {
+      modulo: 'compras',
+      leer: ['ADMIN', 'BODEGUERO'],
+      crear: ['ADMIN', 'BODEGUERO'],
+      editar: ['ADMIN'],
+    },
+    {
+      modulo: 'ventas',
+      leer: ['ADMIN', 'CAJERO'],
+      crear: ['ADMIN', 'CAJERO'],
+      editar: ['ADMIN'],
+    },
+    {
+      modulo: 'caja',
+      leer: ['ADMIN', 'CAJERO'],
+      crear: ['ADMIN', 'CAJERO'],
+      editar: ['ADMIN', 'CAJERO'],
+    },
+    {
+      modulo: 'creditos',
+      leer: ['ADMIN', 'CAJERO'],
+      crear: ['ADMIN'],
+      editar: ['ADMIN'],
+    },
+  ])(
+    'protege todas las rutas del modulo $modulo segun el rol',
+    async (permisos) => {
+      const empresa = await crearEmpresa();
+      const operaciones = [
+        { metodo: 'get', sufijo: '', roles: permisos.leer, exito: 200 },
+        { metodo: 'get', sufijo: '/1', roles: permisos.leer, exito: 200 },
+        { metodo: 'post', sufijo: '', roles: permisos.crear, exito: 201 },
+        { metodo: 'patch', sufijo: '/1', roles: permisos.editar, exito: 200 },
+        { metodo: 'delete', sufijo: '/1', roles: ['ADMIN'], exito: 200 },
+      ] as const;
+
+      for (const operacion of operaciones) {
+        const path = `/${permisos.modulo}${operacion.sufijo}`;
+        const anonima = request(app.getHttpServer())[operacion.metodo](path);
+        if (operacion.metodo === 'post' || operacion.metodo === 'patch')
+          anonima.send({});
+        await anonima.expect(401);
+
+        for (const nombre of ['ADMIN', 'CAJERO', 'BODEGUERO']) {
+          fixture.estado().usuarios[0].rolId = fixture
+            .estado()
+            .roles.find(
+              (rol) => rol.empresaId === empresa.id && rol.nombre === nombre,
+            )!.id;
+          const peticion = request(app.getHttpServer())
+            [operacion.metodo](path)
+            .set('x-usuario-prueba', 'usuario-1');
+          if (operacion.metodo === 'post' || operacion.metodo === 'patch')
+            peticion.send({});
+          const esperado = operacion.roles.some((rol) => rol === nombre)
+            ? operacion.exito
+            : 403;
+          await peticion.expect(esperado);
+        }
+      }
+    },
+  );
 
   it('rechaza importes invalidos, IDs ajenos y campos de control enviados por el cliente', async () => {
     await crearEmpresa();
