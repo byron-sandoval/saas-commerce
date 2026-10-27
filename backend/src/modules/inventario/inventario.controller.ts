@@ -1,9 +1,23 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  Delete,
+  UseGuards,
+} from '@nestjs/common';
 import { InventarioService } from './inventario.service.js';
 import { CreateInventarioDto } from './dto/create-inventario.dto.js';
 import { UpdateInventarioDto } from './dto/update-inventario.dto.js';
 
+import { Roles } from '../roles/roles.decorator.js';
+import { RolesGuard } from '../roles/roles.guard.js';
+
 @Controller('inventario')
+@UseGuards(RolesGuard)
+@Roles('ADMIN', 'BODEGUERO')
 export class InventarioController {
   constructor(private readonly inventarioService: InventarioService) {}
 
@@ -23,11 +37,16 @@ export class InventarioController {
   }
 
   @Patch(':id')
-  update(@Param('id') id: string, @Body() updateInventarioDto: UpdateInventarioDto) {
+  @Roles('ADMIN')
+  update(
+    @Param('id') id: string,
+    @Body() updateInventarioDto: UpdateInventarioDto,
+  ) {
     return this.inventarioService.update(+id, updateInventarioDto);
   }
 
   @Delete(':id')
+  @Roles('ADMIN')
   remove(@Param('id') id: string) {
     return this.inventarioService.remove(+id);
   }
