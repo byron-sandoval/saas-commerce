@@ -38,6 +38,8 @@ function baseSimulada() {
     cajas: [],
     ventas: [],
     detallesVenta: [],
+    creditos: [],
+    devoluciones: [],
   };
   let impedirVinculo = false;
   const error = (code: string) =>
@@ -50,7 +52,10 @@ function baseSimulada() {
       Object.entries(data).filter(([, value]) => value !== undefined),
     );
   const buscar = (tabla: string, where: Row) => {
-    const filtro = { ...where, ...where.empresaId_id };
+    const filtro = {
+      ...where,
+      ...where.empresaId_id,
+    };
     delete filtro.empresaId_id;
     return (
       state[tabla].find((row) =>
@@ -74,8 +79,105 @@ function baseSimulada() {
         ...limpiar(item),
       });
   };
+  const datosVenta = (row: Row, include: Row = {}) => ({
+    ...row,
+    ...(include.detalles
+      ? {
+          detalles: state.detallesVenta.filter(
+            (detalle) => detalle.ventaId === row.id,
+          ),
+        }
+      : {}),
+    ...(include.credito
+      ? {
+          credito:
+            state.creditos.find((credito) => credito.ventaId === row.id) ??
+            null,
+        }
+      : {}),
+    ...(include.devoluciones
+      ? {
+          devoluciones: state.devoluciones.filter(
+            (devolucion) => devolucion.ventaId === row.id,
+          ),
+        }
+      : {}),
+    ...(include.movimientos
+      ? {
+          movimientos: state.movimientos.filter(
+            (movimiento) =>
+              movimiento.ventaId === row.id &&
+              (!include.movimientos.where?.tipo ||
+                movimiento.tipo === include.movimientos.where.tipo),
+          ),
+        }
+      : {}),
+  });
   const db = {
+    credito: {
+      create: vi.fn(async ({ data }: Row) => {
+        if (state.creditos.some((row) => row.ventaId === data.ventaId))
+          throw error('P2002');
+        const venta = buscar('ventas', {
+          id: data.ventaId,
+          empresaId: data.empresaId,
+          clienteId: data.clienteId,
+        });
+        if (!venta) throw error('P2003');
+        const row = {
+          id: randomUUID(),
+          fechaCredito: new Date(),
+          ...limpiar(data),
+        };
+        state.creditos.push(row);
+        return row;
+      }),
+      findUnique: vi.fn(async ({ where, include }: Row) => {
+        const row = buscar('creditos', where);
+        return row
+          ? {
+              ...row,
+              ...(include?.cliente
+                ? {
+                    cliente: buscar('clientes', {
+                      empresaId: row.empresaId,
+                      id: row.clienteId,
+                    }),
+                  }
+                : {}),
+              ...(include?.venta
+                ? {
+                    venta: buscar('ventas', {
+                      empresaId: row.empresaId,
+                      id: row.ventaId,
+                    }),
+                  }
+                : {}),
+            }
+          : null;
+      }),
+      findMany: vi.fn(async ({ where, skip, take }: Row) =>
+        state.creditos
+          .filter((row) =>
+            Object.entries(limpiar(where)).every(
+              ([key, value]) => row[key] === value,
+            ),
+          )
+          .slice(skip, skip + take),
+      ),
+    },
     venta: {
+      updateMany: vi.fn(async ({ where, data }: Row) => {
+        const row = buscar('ventas', where);
+        if (!row) return { count: 0 };
+        Object.assign(row, limpiar(data));
+        return { count: 1 };
+      }),
+      findUniqueOrThrow: vi.fn(async ({ where, include }: Row) => {
+        const row = buscar('ventas', where);
+        if (!row) throw error('P2025');
+        return datosVenta(row, include);
+      }),
       create: vi.fn(async ({ data }: Row) => {
         if (
           state.ventas.some(
@@ -86,7 +188,13 @@ function baseSimulada() {
         )
           throw error('P2002');
         const { detalles, ...cabecera } = data;
-        const row: Row = { id: randomUUID(), ...limpiar(cabecera) };
+        const row: Row = {
+          id: randomUUID(),
+          anuladaEn: null,
+          anuladaPorId: null,
+          motivoAnulacion: null,
+          ...limpiar(cabecera),
+        };
         state.ventas.push(row);
         const items = detalles.create.map((detalle: Row) => ({
           id: randomUUID(),
@@ -97,16 +205,9 @@ function baseSimulada() {
         state.detallesVenta.push(...items);
         return { ...row, detalles: items };
       }),
-      findUnique: vi.fn(async ({ where }: Row) => {
+      findUnique: vi.fn(async ({ where, include }: Row) => {
         const row = buscar('ventas', where);
-        return row
-          ? {
-              ...row,
-              detalles: state.detallesVenta.filter(
-                (detalle) => detalle.ventaId === row.id,
-              ),
-            }
-          : null;
+        return row ? datosVenta(row, include) : null;
       }),
       findMany: vi.fn(async ({ where, skip, take }: Row) =>
         state.ventas
@@ -119,6 +220,11 @@ function baseSimulada() {
       ),
     },
     sesionCaja: {
+      findUniqueOrThrow: vi.fn(async ({ where }: Row) => {
+        const row = buscar('cajas', where);
+        if (!row) throw error('P2025');
+        return row;
+      }),
       updateMany: vi.fn(async ({ where, data }: Row) => {
         const row = buscar('cajas', where);
         if (!row) return { count: 0 };
@@ -146,6 +252,7 @@ function baseSimulada() {
           totalEfectivo: new Prisma.Decimal(0),
           totalTarjeta: new Prisma.Decimal(0),
           totalTransfer: new Prisma.Decimal(0),
+          totalCredito: new Prisma.Decimal(0),
           cantidadVentas: 0,
           ...limpiar(data),
         };
@@ -1711,14 +1818,12 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
       .spyOn(fixture.db, '$transaction')
       .mockImplementationOnce(async () => {
         // Representa una salida confirmada por otra operacion antes del reintento.
-        fixture
-          .estado()
-          .movimientos.push({
-            empresaId: empresa.id,
-            productoId: articulo.id,
-            tipo: 'AJUSTE',
-            cantidad: new Prisma.Decimal('-9'),
-          });
+        fixture.estado().movimientos.push({
+          empresaId: empresa.id,
+          productoId: articulo.id,
+          tipo: 'AJUSTE',
+          cantidad: new Prisma.Decimal('-9'),
+        });
         throw new Prisma.PrismaClientKnownRequestError('Conflicto simulado', {
           code: 'P2034',
           clientVersion: '7',
@@ -1757,14 +1862,12 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
     fixture.estado().productos[0].precioBase = new Prisma.Decimal(
       '9999999999.99',
     );
-    fixture
-      .estado()
-      .movimientos.push({
-        empresaId: empresa.id,
-        productoId: articulo.id,
-        tipo: 'COMPRA',
-        cantidad: new Prisma.Decimal('200'),
-      });
+    fixture.estado().movimientos.push({
+      empresaId: empresa.id,
+      productoId: articulo.id,
+      tipo: 'COMPRA',
+      cantidad: new Prisma.Decimal('200'),
+    });
     await http
       .post('/ventas')
       .set('x-usuario-prueba', 'usuario-1')
@@ -1774,6 +1877,1205 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
       })
       .expect(400);
     expect(fixture.estado().ventas).toEqual([]);
+  });
+
+  it('calcula el arqueo solo con efectivo, cierra la caja y conserva el historial', async () => {
+    const { caja, venta, articulo } = await prepararVenta();
+    fixture.estado().cajas[0].notas = 'Apertura de prueba';
+    const http = request(app.getHttpServer());
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(venta)
+      .expect(201);
+    const { importeRecibido: _importe, ...sinEfectivo } = venta;
+    for (const metodoPago of ['TARJETA', 'TRANSFERENCIA']) {
+      await http
+        .post('/ventas')
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ ...sinEfectivo, metodoPago })
+        .expect(201);
+    }
+    const arqueo = await http
+      .get(`/caja/${caja.id}/arqueo`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(arqueo.body).toMatchObject({
+      estado: 'ABIERTA',
+      efectivoInicial: '100',
+      totalVentas: '865.95',
+      totalEfectivo: '288.65',
+      totalTarjeta: '288.65',
+      totalTransfer: '288.65',
+      cantidadVentas: 3,
+      efectivoEsperado: '388.65',
+      efectivoCierre: null,
+      diferencia: null,
+    });
+    expect(fixture.estado().cajas[0].efectivoEsperado).toBeNull();
+    const cerrada = await http
+      .post(`/caja/${caja.id}/cerrar`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoCierre: '388.65', notas: ' Conteo verificado ' })
+      .expect(200);
+    expect(cerrada.body).toMatchObject({
+      estado: 'CERRADA',
+      abiertoPorId: 'usuario-1',
+      cerradoPorId: 'usuario-1',
+      efectivoCierre: '388.65',
+      efectivoEsperado: '388.65',
+      diferencia: '0',
+      cantidadVentas: 3,
+      notas: 'Apertura de prueba\nCierre: Conteo verificado',
+    });
+    expect(new Date(cerrada.body.cerradoEn).getTime()).not.toBeNaN();
+    await http
+      .post(`/caja/${caja.id}/cerrar`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoCierre: '0', notas: 'No debe sobrescribir' })
+      .expect(409);
+    const historica = await http
+      .get(`/caja/${caja.id}/arqueo`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(historica.body).toMatchObject({
+      efectivoCierre: '388.65',
+      diferencia: '0',
+      cerradoEn: cerrada.body.cerradoEn,
+    });
+    await http
+      .get('/caja/actual')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(404);
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(venta)
+      .expect(409);
+    expect(fixture.estado().ventas).toHaveLength(3);
+    const stock = await http
+      .get(`${ruta}/${articulo.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(stock.body.stockDisponible).toBe('4');
+    const nueva = await http
+      .post('/caja')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoInicial: '0' })
+      .expect(201);
+    expect(nueva.body.id).not.toBe(caja.id);
+    expect(fixture.estado().cajas).toHaveLength(2);
+  });
+
+  it.each([
+    { contado: '99.90', diferencia: '-0.1' },
+    { contado: '100.10', diferencia: '0.1' },
+    { contado: '100.00', diferencia: '0' },
+  ])(
+    'conserva la diferencia de arqueo con efectivo contado $contado',
+    async ({ contado, diferencia }) => {
+      await crearEmpresa();
+      const http = request(app.getHttpServer());
+      const caja = await http
+        .post('/caja')
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ efectivoInicial: '100' })
+        .expect(201);
+      const cerrada = await http
+        .post(`/caja/${caja.body.id}/cerrar`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ efectivoCierre: contado })
+        .expect(200);
+      expect(cerrada.body).toMatchObject({
+        estado: 'CERRADA',
+        efectivoEsperado: '100',
+        diferencia,
+      });
+    },
+  );
+
+  it('valida el conteo y rechaza totales, propietario y fecha de cierre enviados por el cliente', async () => {
+    await crearEmpresa();
+    const http = request(app.getHttpServer());
+    const caja = await http
+      .post('/caja')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoInicial: '100' })
+      .expect(201);
+    const id = caja.body.id;
+    for (const efectivoCierre of [
+      undefined,
+      null,
+      100,
+      '-1',
+      '1.001',
+      '1000000000000',
+      '',
+      '1e2',
+      '1\n',
+    ]) {
+      await http
+        .post(`/caja/${id}/cerrar`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ efectivoCierre })
+        .expect(400);
+    }
+    for (const campo of [
+      'empresaId',
+      'abiertoPorId',
+      'cerradoPorId',
+      'cerradoEn',
+      'estado',
+      'efectivoEsperado',
+      'diferencia',
+      'totalEfectivo',
+      'totalVentas',
+      'esAdmin',
+    ]) {
+      await http
+        .post(`/caja/${id}/cerrar`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ efectivoCierre: '100', [campo]: 'no-permitido' })
+        .expect(400);
+    }
+    for (const notas of [null, 1, ' ', 'x'.repeat(1001)]) {
+      await http
+        .post(`/caja/${id}/cerrar`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ efectivoCierre: '100', notas })
+        .expect(400);
+    }
+    await http
+      .get('/caja/invalido/arqueo')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(400);
+    await http
+      .post('/caja/invalido/cerrar')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoCierre: '0' })
+      .expect(400);
+    const desconocida = randomUUID();
+    await http
+      .get(`/caja/${desconocida}/arqueo`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(404);
+    await http
+      .post(`/caja/${desconocida}/cerrar`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoCierre: '0' })
+      .expect(404);
+    expect(fixture.estado().cajas[0]).toMatchObject({
+      estado: 'ABIERTA',
+      cerradoPorId: null,
+      cerradoEn: null,
+      efectivoCierre: null,
+      efectivoEsperado: null,
+      diferencia: null,
+    });
+  });
+
+  it('ADMIN puede cerrar la caja del cajero de su empresa y registra quien efectuo el cierre', async () => {
+    const empresa = await crearEmpresa();
+    fixture
+      .estado()
+      .usuarios.push({ ...fixture.estado().usuarios[1], id: 'usuario-3' });
+    await crearEmpresa('usuario-3');
+    Object.assign(fixture.estado().usuarios[1], {
+      empresaId: empresa.id,
+      rolId: empresa.roles.find((rol: Row) => rol.nombre === 'CAJERO').id,
+    });
+    const http = request(app.getHttpServer());
+    const admin = await http
+      .post('/caja')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoInicial: '10' })
+      .expect(201);
+    const cajero = await http
+      .post('/caja')
+      .set('x-usuario-prueba', 'usuario-2')
+      .send({ efectivoInicial: '20' })
+      .expect(201);
+    await http
+      .get(`/caja/${admin.body.id}/arqueo`)
+      .set('x-usuario-prueba', 'usuario-2')
+      .set('x-role', 'ADMIN')
+      .expect(404);
+    await http
+      .post(`/caja/${admin.body.id}/cerrar`)
+      .set('x-usuario-prueba', 'usuario-2')
+      .set('x-role', 'ADMIN')
+      .send({ efectivoCierre: '10' })
+      .expect(404);
+    await http
+      .get(`/caja/${admin.body.id}/arqueo`)
+      .set('x-usuario-prueba', 'usuario-3')
+      .expect(404);
+    await http
+      .post(`/caja/${cajero.body.id}/cerrar`)
+      .set('x-usuario-prueba', 'usuario-3')
+      .send({ efectivoCierre: '20' })
+      .expect(404);
+    const cerrada = await http
+      .post(`/caja/${cajero.body.id}/cerrar`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoCierre: '20' })
+      .expect(200);
+    expect(cerrada.body).toMatchObject({
+      abiertoPorId: 'usuario-2',
+      cerradoPorId: 'usuario-1',
+      estado: 'CERRADA',
+    });
+    expect(
+      fixture.estado().cajas.find((row) => row.id === admin.body.id)?.estado,
+    ).toBe('ABIERTA');
+  });
+
+  it.each(['ADMIN', 'CAJERO', 'BODEGUERO'])(
+    'verifica sesion y permiso para arqueo y cierre como %s',
+    async (nombre) => {
+      const empresa = await crearEmpresa();
+      const http = request(app.getHttpServer());
+      const caja = await http
+        .post('/caja')
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ efectivoInicial: '0' })
+        .expect(201);
+      fixture.estado().usuarios[0].rolId = empresa.roles.find(
+        (rol: Row) => rol.nombre === nombre,
+      ).id;
+      await http.get(`/caja/${caja.body.id}/arqueo`).expect(401);
+      await http
+        .post(`/caja/${caja.body.id}/cerrar`)
+        .send({ efectivoCierre: '0' })
+        .expect(401);
+      const esperado = nombre === 'BODEGUERO' ? 403 : 200;
+      await http
+        .get(`/caja/${caja.body.id}/arqueo`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(esperado);
+      await http
+        .post(`/caja/${caja.body.id}/cerrar`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ efectivoCierre: '0' })
+        .expect(esperado);
+      expect(fixture.estado().cajas[0].estado).toBe(
+        nombre === 'BODEGUERO' ? 'ABIERTA' : 'CERRADA',
+      );
+    },
+  );
+
+  it('revierte un cierre fallido y reintenta sin duplicar notas ni sobrescribir el primer cierre', async () => {
+    await crearEmpresa();
+    const http = request(app.getHttpServer());
+    const caja = await http
+      .post('/caja')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoInicial: '100', notas: 'Apertura' })
+      .expect(201);
+    const fallo = (code: string) =>
+      new Prisma.PrismaClientKnownRequestError('Fallo simulado', {
+        code,
+        clientVersion: '7',
+      });
+    fixture.db.sesionCaja.findUniqueOrThrow.mockRejectedValueOnce(
+      fallo('P2003'),
+    );
+    await http
+      .post(`/caja/${caja.body.id}/cerrar`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoCierre: '100', notas: 'Revisado' })
+      .expect(409);
+    expect(fixture.estado().cajas[0]).toMatchObject({
+      estado: 'ABIERTA',
+      cerradoEn: null,
+      efectivoCierre: null,
+      efectivoEsperado: null,
+      diferencia: null,
+      notas: 'Apertura',
+    });
+    fixture.db.sesionCaja.updateMany.mockResolvedValueOnce({ count: 0 });
+    await http
+      .post(`/caja/${caja.body.id}/cerrar`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoCierre: '100' })
+      .expect(409);
+    fixture.db.sesionCaja.findUniqueOrThrow.mockRejectedValueOnce(
+      fallo('P2034'),
+    );
+    const transaccion = vi.spyOn(fixture.db, '$transaction');
+    const cerrada = await http
+      .post(`/caja/${caja.body.id}/cerrar`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoCierre: '100', notas: 'Revisado' })
+      .expect(200);
+    expect(transaccion).toHaveBeenCalledTimes(2);
+    expect(transaccion).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+    });
+    expect(cerrada.body.notas).toBe('Apertura\nCierre: Revisado');
+    transaccion.mockRestore();
+  });
+
+  it('recalcula el esperado si otra venta confirma efectivo durante un reintento del cierre', async () => {
+    await crearEmpresa();
+    const http = request(app.getHttpServer());
+    const caja = await http
+      .post('/caja')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoInicial: '100' })
+      .expect(201);
+    const transaccion = vi
+      .spyOn(fixture.db, '$transaction')
+      .mockImplementationOnce(async () => {
+        // Representa los acumulados confirmados por una venta concurrente.
+        fixture.estado().cajas[0].totalEfectivo = new Prisma.Decimal('30.10');
+        fixture.estado().cajas[0].cantidadVentas = 1;
+        throw new Prisma.PrismaClientKnownRequestError('Conflicto simulado', {
+          code: 'P2034',
+          clientVersion: '7',
+        });
+      });
+    const cerrada = await http
+      .post(`/caja/${caja.body.id}/cerrar`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoCierre: '130.10' })
+      .expect(200);
+    expect(cerrada.body).toMatchObject({
+      efectivoEsperado: '130.1',
+      efectivoCierre: '130.1',
+      diferencia: '0',
+    });
+    expect(transaccion).toHaveBeenCalledTimes(2);
+    transaccion.mockRestore();
+  });
+
+  it('una venta reintentada tras un cierre confirmado no deja factura, movimientos ni detalles', async () => {
+    const { venta } = await prepararVenta();
+    const transaccion = vi
+      .spyOn(fixture.db, '$transaction')
+      .mockImplementationOnce(async () => {
+        // Representa el resultado confirmado de otra solicitud de cierre.
+        Object.assign(fixture.estado().cajas[0], {
+          estado: 'CERRADA',
+          cerradoPorId: 'usuario-1',
+          cerradoEn: new Date(),
+          efectivoCierre: new Prisma.Decimal(100),
+          efectivoEsperado: new Prisma.Decimal(100),
+          diferencia: new Prisma.Decimal(0),
+        });
+        throw new Prisma.PrismaClientKnownRequestError('Conflicto simulado', {
+          code: 'P2034',
+          clientVersion: '7',
+        });
+      });
+    await request(app.getHttpServer())
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(venta)
+      .expect(409);
+    expect(fixture.estado().ventas).toEqual([]);
+    expect(fixture.estado().detallesVenta).toEqual([]);
+    expect(fixture.estado().movimientos).toHaveLength(1);
+    expect(
+      fixture.estado().secuencias.some((row) => row.tipo === 'FACTURA'),
+    ).toBe(false);
+    expect(fixture.estado().cajas[0].estado).toBe('CERRADA');
+    transaccion.mockRestore();
+  });
+
+  it('evita exceder la precision del arqueo y protege nuevas ventas en efectivo', async () => {
+    const { venta, caja } = await prepararVenta();
+    fixture.estado().cajas[0].efectivoInicial = new Prisma.Decimal(
+      '999999999999.99',
+    );
+    const http = request(app.getHttpServer());
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(venta)
+      .expect(400);
+    expect(fixture.estado().ventas).toEqual([]);
+    fixture.estado().cajas[0].totalEfectivo = new Prisma.Decimal('0.01');
+    await http
+      .get(`/caja/${caja.id}/arqueo`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(400);
+    await http
+      .post(`/caja/${caja.id}/cerrar`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoCierre: '999999999999.99' })
+      .expect(400);
+    expect(fixture.estado().cajas[0].estado).toBe('ABIERTA');
+  });
+
+  async function prepararAnulacion(usuario = 'usuario-1') {
+    const contexto = await prepararVenta(usuario);
+    const creada = await request(app.getHttpServer())
+      .post('/ventas')
+      .set('x-usuario-prueba', usuario)
+      .send(contexto.venta)
+      .expect(201);
+    return { ...contexto, registrada: creada.body };
+  }
+
+  it('anula una venta conservando factura y detalles, devuelve el stock y revierte caja con auditoria', async () => {
+    const { registrada, articulo, caja, cliente, venta } =
+      await prepararAnulacion();
+    const http = request(app.getHttpServer());
+    await http
+      .patch(`${ruta}/${articulo.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ activo: false, precioBase: '999.99', precioCosto: '199.99' })
+      .expect(200);
+    await http
+      .delete(`/ventas/clientes/${cliente.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(204);
+    const anulada = await http
+      .post(`/ventas/${registrada.id}/anular`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ motivo: ' Error de registro ' })
+      .expect(200);
+    expect(anulada.body).toMatchObject({
+      id: registrada.id,
+      estado: 'ANULADA',
+      numeroFactura: 'F-0001',
+      usuarioId: 'usuario-1',
+      anuladaPorId: 'usuario-1',
+      motivoAnulacion: 'Error de registro',
+      subtotal: '251',
+      montoIVA: '37.65',
+      total: '288.65',
+      importeRecibido: '500',
+      cambio: '211.35',
+    });
+    expect(new Date(anulada.body.anuladaEn).getTime()).not.toBeNaN();
+    expect(anulada.body.detalles).toEqual(registrada.detalles);
+    expect(fixture.estado().ventas).toHaveLength(1);
+    expect(fixture.estado().detallesVenta).toHaveLength(1);
+    const salida = fixture
+      .estado()
+      .movimientos.find((row) => row.tipo === 'VENTA');
+    expect(salida?.cantidad.toString()).toBe('-2');
+    const inversos = fixture
+      .estado()
+      .movimientos.filter((row) => row.tipo === 'ANULACION_VENTA');
+    expect(inversos).toHaveLength(1);
+    expect(inversos[0]).toMatchObject({
+      ventaId: registrada.id,
+      productoId: articulo.id,
+      usuarioId: 'usuario-1',
+      nota: 'Anulacion F-0001: Error de registro',
+    });
+    expect(inversos[0].cantidad.toString()).toBe('2');
+    expect(inversos[0].costoUnidad.toString()).toBe('80.25');
+    const cajaFinal = await http
+      .get(`/caja/${caja.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(cajaFinal.body).toMatchObject({
+      efectivoInicial: '100',
+      totalVentas: '0',
+      totalEfectivo: '0',
+      cantidadVentas: 0,
+    });
+    await http
+      .post(`/ventas/${registrada.id}/anular`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ motivo: 'No sobrescribir' })
+      .expect(409);
+    expect(
+      fixture
+        .estado()
+        .movimientos.filter((row) => row.tipo === 'ANULACION_VENTA'),
+    ).toHaveLength(1);
+    await http
+      .patch(`${ruta}/${articulo.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ activo: true })
+      .expect(200);
+    const stock = await http
+      .get(`/inventario/${articulo.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(stock.body.stockDisponible).toBe('10');
+    const lista = await http
+      .get('/ventas?estado=ANULADA')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(lista.body.datos[0].id).toBe(registrada.id);
+    const nuevoCliente = await http
+      .post('/ventas/clientes')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ nombre: 'Otro cliente' })
+      .expect(201);
+    const { importeRecibido: _importe, ...pagoExacto } = venta;
+    const siguiente = await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ ...pagoExacto, clienteId: nuevoCliente.body.id })
+      .expect(201);
+    expect(siguiente.body.numeroFactura).toBe('F-0002');
+  });
+
+  it.each(['TARJETA', 'TRANSFERENCIA'])(
+    'revierte solo el acumulado de %s sin alterar el efectivo',
+    async (metodoPago) => {
+      const { venta } = await prepararVenta();
+      const http = request(app.getHttpServer());
+      const { importeRecibido: _importe, ...base } = venta;
+      const creada = await http
+        .post('/ventas')
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ ...base, metodoPago })
+        .expect(201);
+      await http
+        .post(`/ventas/${creada.body.id}/anular`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ motivo: 'Venta duplicada' })
+        .expect(200);
+      const caja = await http
+        .get('/caja/actual')
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(200);
+      expect(caja.body).toMatchObject({
+        totalVentas: '0',
+        totalEfectivo: '0',
+        totalTarjeta: '0',
+        totalTransfer: '0',
+        cantidadVentas: 0,
+      });
+      const arqueo = await http
+        .get(`/caja/${caja.body.id}/arqueo`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(200);
+      expect(arqueo.body.efectivoEsperado).toBe('100');
+    },
+  );
+
+  it.each(['CAJERO', 'BODEGUERO'])(
+    'prohibe anular ventas a %s aunque envie un rol administrativo',
+    async (nombre) => {
+      const { registrada, empresa } = await prepararAnulacion();
+      fixture.estado().usuarios[0].rolId = empresa.roles.find(
+        (rol: Row) => rol.nombre === nombre,
+      ).id;
+      await request(app.getHttpServer())
+        .post(`/ventas/${registrada.id}/anular`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .set('x-role', 'ADMIN')
+        .send({ motivo: 'No permitido' })
+        .expect(403);
+      expect(fixture.estado().ventas[0].estado).toBe('COMPLETADA');
+      expect(fixture.estado().movimientos).toHaveLength(2);
+    },
+  );
+
+  it('valida motivo, UUID y sesion y rechaza cantidades o auditoria proporcionadas por el cliente', async () => {
+    const { registrada } = await prepararAnulacion();
+    const http = request(app.getHttpServer());
+    const base = `/ventas/${registrada.id}/anular`;
+    await http.post(base).send({ motivo: 'Prueba' }).expect(401);
+    for (const motivo of [undefined, null, 1, '', ' ', 'x'.repeat(501)]) {
+      await http
+        .post(base)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ motivo })
+        .expect(400);
+    }
+    for (const campo of [
+      'empresaId',
+      'usuarioId',
+      'anuladaPorId',
+      'anuladaEn',
+      'estado',
+      'total',
+      'detalles',
+      'cantidad',
+      'sesionCajaId',
+    ]) {
+      await http
+        .post(base)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ motivo: 'Prueba', [campo]: 'no-permitido' })
+        .expect(400);
+    }
+    await http
+      .post('/ventas/invalido/anular')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ motivo: 'Prueba' })
+      .expect(400);
+    await http
+      .post(`/ventas/${randomUUID()}/anular`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ motivo: 'Prueba' })
+      .expect(404);
+    expect(fixture.estado().ventas[0]).toMatchObject({
+      estado: 'COMPLETADA',
+      anuladaPorId: null,
+      anuladaEn: null,
+      motivoAnulacion: null,
+    });
+  });
+
+  it('permite a ADMIN anular ventas del cajero en su caja original, sin acceso entre empresas', async () => {
+    const { empresa, venta, caja } = await prepararVenta();
+    fixture
+      .estado()
+      .usuarios.push({ ...fixture.estado().usuarios[1], id: 'usuario-3' });
+    await crearEmpresa('usuario-3');
+    Object.assign(fixture.estado().usuarios[1], {
+      empresaId: empresa.id,
+      rolId: empresa.roles.find((rol: Row) => rol.nombre === 'CAJERO').id,
+    });
+    const http = request(app.getHttpServer());
+    await http
+      .post(`/caja/${caja.id}/cerrar`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoCierre: '100' })
+      .expect(200);
+    const cajaCajero = await http
+      .post('/caja')
+      .set('x-usuario-prueba', 'usuario-2')
+      .send({ efectivoInicial: '0' })
+      .expect(201);
+    const creada = await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-2')
+      .send(venta)
+      .expect(201);
+    await http
+      .post(`/ventas/${creada.body.id}/anular`)
+      .set('x-usuario-prueba', 'usuario-3')
+      .send({ motivo: 'Ajena' })
+      .expect(404);
+    const anulada = await http
+      .post(`/ventas/${creada.body.id}/anular`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ motivo: 'Correccion administrativa' })
+      .expect(200);
+    expect(anulada.body).toMatchObject({
+      usuarioId: 'usuario-2',
+      anuladaPorId: 'usuario-1',
+      sesionCajaId: cajaCajero.body.id,
+    });
+    const original = await http
+      .get(`/caja/${cajaCajero.body.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(original.body).toMatchObject({
+      totalVentas: '0',
+      totalEfectivo: '0',
+      cantidadVentas: 0,
+    });
+    expect(
+      fixture.estado().cajas.find((row) => row.id === caja.id)?.estado,
+    ).toBe('CERRADA');
+  });
+
+  it('rechaza anular ventas de cajas cerradas y conserva su arqueo', async () => {
+    const { registrada, caja } = await prepararAnulacion();
+    const http = request(app.getHttpServer());
+    const cierre = await http
+      .post(`/caja/${caja.id}/cerrar`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoCierre: '388.65' })
+      .expect(200);
+    await http
+      .post(`/ventas/${registrada.id}/anular`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ motivo: 'Fuera de plazo' })
+      .expect(409);
+    const conservada = await http
+      .get(`/caja/${caja.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(conservada.body).toEqual(cierre.body);
+    expect(fixture.estado().ventas[0].estado).toBe('COMPLETADA');
+    expect(fixture.estado().movimientos).toHaveLength(2);
+  });
+
+  it.each(['creditos', 'devoluciones'])(
+    'no anula ventas con registros vinculados de %s sin implementar su tratamiento',
+    async (tabla) => {
+      const { registrada } = await prepararAnulacion();
+      fixture
+        .estado()
+        [tabla].push({ id: randomUUID(), ventaId: registrada.id });
+      await request(app.getHttpServer())
+        .post(`/ventas/${registrada.id}/anular`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ motivo: 'Prueba' })
+        .expect(409);
+      expect(fixture.estado().ventas[0].estado).toBe('COMPLETADA');
+      expect(fixture.estado().movimientos).toHaveLength(2);
+    },
+  );
+
+  it('bloquea anulaciones con salidas de inventario o acumulados de caja inconsistentes', async () => {
+    const { registrada } = await prepararAnulacion();
+    const http = request(app.getHttpServer());
+    const originales = fixture.estado().movimientos.map((row) => ({ ...row }));
+    fixture.estado().movimientos = fixture
+      .estado()
+      .movimientos.filter((row) => row.tipo !== 'VENTA');
+    await http
+      .post(`/ventas/${registrada.id}/anular`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ motivo: 'Prueba' })
+      .expect(409);
+    fixture.estado().movimientos = originales;
+    fixture.estado().cajas[0].totalEfectivo = new Prisma.Decimal(0);
+    await http
+      .post(`/ventas/${registrada.id}/anular`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ motivo: 'Prueba' })
+      .expect(409);
+    expect(fixture.estado().ventas[0].estado).toBe('COMPLETADA');
+    expect(fixture.estado().movimientos).toHaveLength(2);
+  });
+
+  it('revierte toda la anulacion si falla inventario o caja y reintenta sin duplicar devolucion de stock', async () => {
+    const { registrada } = await prepararAnulacion();
+    const http = request(app.getHttpServer());
+    const fallo = (code: string) =>
+      new Prisma.PrismaClientKnownRequestError('Fallo simulado', {
+        code,
+        clientVersion: '7',
+      });
+    const enviar = () =>
+      http
+        .post(`/ventas/${registrada.id}/anular`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ motivo: 'Prueba' });
+    fixture.db.venta.updateMany.mockResolvedValueOnce({ count: 0 });
+    await enviar().expect(409);
+    fixture.db.movimientoAlmacen.createMany.mockImplementationOnce(async () => {
+      fixture.estado().movimientos.push({ id: 'incompleto' });
+      throw fallo('P2003');
+    });
+    await enviar().expect(409);
+    fixture.db.sesionCaja.updateMany.mockResolvedValueOnce({ count: 0 });
+    await enviar().expect(409);
+    expect(fixture.estado().ventas[0]).toMatchObject({
+      estado: 'COMPLETADA',
+      anuladaEn: null,
+      anuladaPorId: null,
+    });
+    expect(fixture.estado().movimientos).toHaveLength(2);
+    expect(fixture.estado().cajas[0].totalEfectivo.toString()).toBe('288.65');
+    expect(fixture.estado().cajas[0].cantidadVentas).toBe(1);
+    fixture.db.venta.findUniqueOrThrow.mockRejectedValueOnce(fallo('P2034'));
+    const transaccion = vi.spyOn(fixture.db, '$transaction');
+    await enviar().expect(200);
+    expect(transaccion).toHaveBeenCalledTimes(2);
+    expect(transaccion).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+    });
+    expect(
+      fixture
+        .estado()
+        .movimientos.filter((row) => row.tipo === 'ANULACION_VENTA'),
+    ).toHaveLength(1);
+    expect(fixture.estado().cajas[0].totalVentas.toString()).toBe('0');
+    expect(fixture.estado().cajas[0].cantidadVentas).toBe(0);
+    transaccion.mockRestore();
+  });
+
+  it('vuelve a comprobar el estado de la caja cuando un cierre concurrente obliga a reintentar', async () => {
+    const { registrada } = await prepararAnulacion();
+    const transaccion = vi
+      .spyOn(fixture.db, '$transaction')
+      .mockImplementationOnce(async () => {
+        // Representa un cierre ya confirmado por otra solicitud.
+        Object.assign(fixture.estado().cajas[0], {
+          estado: 'CERRADA',
+          efectivoEsperado: new Prisma.Decimal('388.65'),
+          efectivoCierre: new Prisma.Decimal('388.65'),
+          diferencia: new Prisma.Decimal(0),
+          cerradoEn: new Date(),
+        });
+        throw new Prisma.PrismaClientKnownRequestError('Conflicto simulado', {
+          code: 'P2034',
+          clientVersion: '7',
+        });
+      });
+    await request(app.getHttpServer())
+      .post(`/ventas/${registrada.id}/anular`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ motivo: 'Prueba concurrente' })
+      .expect(409);
+    expect(fixture.estado().ventas[0].estado).toBe('COMPLETADA');
+    expect(fixture.estado().movimientos).toHaveLength(2);
+    expect(fixture.estado().cajas[0].efectivoEsperado.toString()).toBe(
+      '388.65',
+    );
+    transaccion.mockRestore();
+  });
+
+  function datosVentaCredito(venta: Row) {
+    return {
+      clienteId: venta.clienteId,
+      tipoVenta: 'CREDITO',
+      detalles: venta.detalles,
+      credito: {
+        fechaVencimiento: new Date(Date.now() + 86_400_000).toISOString(),
+        descripcion: 'Credito de prueba',
+      },
+    };
+  }
+
+  it('crea venta y credito del mismo cliente y empresa sin registrar cobro, y permite cerrar la caja', async () => {
+    const { venta, empresa, caja, cliente, articulo } = await prepararVenta();
+    const http = request(app.getHttpServer());
+    const creada = await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(datosVentaCredito(venta))
+      .expect(201);
+    expect(creada.body).toMatchObject({
+      tipoVenta: 'CREDITO',
+      metodoPago: null,
+      importeRecibido: null,
+      cambio: null,
+      total: '288.65',
+    });
+    expect(creada.body.credito).toMatchObject({
+      empresaId: empresa.id,
+      clienteId: cliente.id,
+      ventaId: creada.body.id,
+      montoOriginal: '288.65',
+      saldoPendiente: '288.65',
+      estado: 'PENDIENTE',
+      descripcion: 'Credito de prueba',
+    });
+    expect(fixture.estado().creditos).toHaveLength(1);
+    const actual = await http
+      .get('/caja/actual')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(actual.body).toMatchObject({
+      totalVentas: '288.65',
+      totalCredito: '288.65',
+      totalEfectivo: '0',
+      totalTarjeta: '0',
+      totalTransfer: '0',
+      cantidadVentas: 1,
+    });
+    const stock = await http
+      .get(`${ruta}/${articulo.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(stock.body.stockDisponible).toBe('8');
+    const registrada = await http
+      .get(`/ventas/${creada.body.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(registrada.body.credito.id).toBe(creada.body.credito.id);
+    const leido = await http
+      .get(`/creditos/${creada.body.credito.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(leido.body.cliente.id).toBe(cliente.id);
+    expect(leido.body.venta.id).toBe(creada.body.id);
+    const listado = await http
+      .get(`/creditos?clienteId=${cliente.id}&estado=PENDIENTE&limite=1`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(listado.body.datos.map((row: Row) => row.id)).toEqual([
+      creada.body.credito.id,
+    ]);
+    await http
+      .post(`/ventas/${creada.body.id}/anular`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ motivo: 'No debe borrar la deuda' })
+      .expect(409);
+    const cerrada = await http
+      .post(`/caja/${caja.id}/cerrar`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoCierre: '100.00' })
+      .expect(200);
+    expect(cerrada.body).toMatchObject({
+      efectivoEsperado: '100',
+      diferencia: '0',
+      totalCredito: '288.65',
+    });
+    const pendiente = await http
+      .get(`/creditos/${creada.body.credito.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(pendiente.body).toMatchObject({
+      saldoPendiente: '288.65',
+      estado: 'PENDIENTE',
+    });
+  });
+
+  it('separa ventas cobradas y financiadas en la misma caja y mantiene el arqueo correcto', async () => {
+    const { venta, caja } = await prepararVenta();
+    const http = request(app.getHttpServer());
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(datosVentaCredito(venta))
+      .expect(201);
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(venta)
+      .expect(201);
+    const arqueo = await http
+      .get(`/caja/${caja.id}/arqueo`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(arqueo.body).toMatchObject({
+      totalVentas: '577.3',
+      totalCredito: '288.65',
+      totalEfectivo: '288.65',
+      efectivoEsperado: '388.65',
+      cantidadVentas: 2,
+    });
+    expect(fixture.estado().creditos).toHaveLength(1);
+    expect(fixture.estado().ventas.map((row) => row.tipoVenta)).toEqual([
+      'CREDITO',
+      'CONTADO',
+    ]);
+  });
+
+  it.each(['ADMIN', 'CAJERO', 'BODEGUERO'])(
+    'verifica creacion de credito y consulta de cartera para %s',
+    async (nombre) => {
+      const { venta, empresa } = await prepararVenta();
+      const http = request(app.getHttpServer());
+      const creada = await http
+        .post('/ventas')
+        .set('x-usuario-prueba', 'usuario-1')
+        .send(datosVentaCredito(venta))
+        .expect(201);
+      fixture.estado().usuarios[0].rolId = empresa.roles.find(
+        (rol: Row) => rol.nombre === nombre,
+      ).id;
+      await http.get('/creditos').expect(401);
+      await http.get(`/creditos/${creada.body.credito.id}`).expect(401);
+      await http
+        .get('/creditos')
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(nombre === 'BODEGUERO' ? 403 : 200);
+      await http
+        .get(`/creditos/${creada.body.credito.id}`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(nombre === 'BODEGUERO' ? 403 : 200);
+      await http
+        .post('/ventas')
+        .set('x-usuario-prueba', 'usuario-1')
+        .set('x-role', 'ADMIN')
+        .send(datosVentaCredito(venta))
+        .expect(nombre === 'ADMIN' ? 201 : 403);
+      expect(fixture.estado().creditos).toHaveLength(
+        nombre === 'ADMIN' ? 2 : 1,
+      );
+    },
+  );
+
+  it('valida condiciones de credito y rechaza cobros, montos de deuda y clientes genericos', async () => {
+    const { venta } = await prepararVenta();
+    const credito = datosVentaCredito(venta);
+    const http = request(app.getHttpServer());
+    const invalidas = [
+      { ...credito, tipoVenta: 'INVALIDO' },
+      { ...credito, metodoPago: 'EFECTIVO' },
+      { ...credito, importeRecibido: '1' },
+      { ...credito, referenciaPago: 'REF' },
+      { ...credito, credito: null },
+      { ...credito, credito: [] },
+      { ...credito, credito: { fechaVencimiento: 'no-es-fecha' } },
+      { ...credito, credito: { fechaVencimiento: '2000-01-01T00:00:00Z' } },
+      { ...credito, credito: { fechaVencimiento: null } },
+      { ...credito, credito: { descripcion: 'x'.repeat(401) } },
+      ...[
+        'empresaId',
+        'clienteId',
+        'ventaId',
+        'saldoPendiente',
+        'montoOriginal',
+        'estado',
+      ].map((campo) => ({
+        ...credito,
+        credito: { [campo]: 'dato-no-permitido' },
+      })),
+      { ...venta, credito: {} },
+    ];
+    for (const body of invalidas)
+      await http
+        .post('/ventas')
+        .set('x-usuario-prueba', 'usuario-1')
+        .send(body)
+        .expect(400);
+    fixture.estado().clientes[0].esGenerico = true;
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(credito)
+      .expect(400);
+    fixture.estado().clientes[0].esGenerico = false;
+    fixture.estado().productos[0].precioBase = new Prisma.Decimal(0);
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(credito)
+      .expect(400);
+    fixture.estado().productos[0].precioBase = new Prisma.Decimal('125.50');
+    fixture.estado().cajas[0].totalCredito = new Prisma.Decimal(
+      '999999999999.99',
+    );
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(credito)
+      .expect(400);
+    expect(fixture.estado().creditos).toEqual([]);
+    expect(fixture.estado().ventas).toEqual([]);
+    expect(fixture.estado().movimientos).toHaveLength(1);
+    expect(
+      fixture.estado().secuencias.some((row) => row.tipo === 'FACTURA'),
+    ).toBe(false);
+    for (const query of [
+      'pagina=0',
+      'limite=101',
+      'estado=INVALIDO',
+      'clienteId=invalido',
+      'empresaId=ajena',
+    ]) {
+      await http
+        .get(`/creditos?${query}`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(400);
+    }
+    await http
+      .get('/creditos/invalido')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(400);
+    await http
+      .get(`/creditos/${randomUUID()}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(404);
+  });
+
+  it('separa creditos por empresa y permite al cajero consultar los de su empresa', async () => {
+    const propia = await prepararVenta();
+    const ajena = await prepararVenta('usuario-2');
+    const http = request(app.getHttpServer());
+    const creditoPropio = datosVentaCredito(propia.venta);
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ ...creditoPropio, clienteId: ajena.cliente.id })
+      .expect(400);
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({
+        ...creditoPropio,
+        detalles: [{ productoId: ajena.articulo.id, cantidad: '1' }],
+      })
+      .expect(400);
+    const primera = await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(creditoPropio)
+      .expect(201);
+    const segunda = await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-2')
+      .send(datosVentaCredito(ajena.venta))
+      .expect(201);
+    await http
+      .get(`/creditos/${primera.body.credito.id}`)
+      .set('x-usuario-prueba', 'usuario-2')
+      .expect(404);
+    const lista = await http
+      .get('/creditos')
+      .set('x-usuario-prueba', 'usuario-2')
+      .expect(200);
+    expect(lista.body.datos.map((row: Row) => row.id)).toEqual([
+      segunda.body.credito.id,
+    ]);
+    const filtro = await http
+      .get(`/creditos?clienteId=${ajena.cliente.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(filtro.body.datos).toEqual([]);
+    fixture.estado().usuarios.push({
+      ...fixture.estado().usuarios[0],
+      id: 'usuario-3',
+      rolId: propia.empresa.roles.find((rol: Row) => rol.nombre === 'CAJERO')
+        .id,
+    });
+    const cartera = await http
+      .get('/creditos')
+      .set('x-usuario-prueba', 'usuario-3')
+      .expect(200);
+    expect(cartera.body.datos.map((row: Row) => row.id)).toEqual([
+      primera.body.credito.id,
+    ]);
+  });
+
+  it('revierte venta, credito, inventario y caja ante fallos y reintenta sin duplicar deuda', async () => {
+    const { venta } = await prepararVenta();
+    const http = request(app.getHttpServer());
+    const datos = datosVentaCredito(venta);
+    const fallo = (code: string) =>
+      new Prisma.PrismaClientKnownRequestError('Fallo simulado', {
+        code,
+        clientVersion: '7',
+      });
+    fixture.db.credito.create.mockImplementationOnce(async () => {
+      fixture.estado().creditos.push({ id: 'incompleto' });
+      throw fallo('P2003');
+    });
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(datos)
+      .expect(409);
+    fixture.db.movimientoAlmacen.createMany.mockRejectedValueOnce(
+      fallo('P2003'),
+    );
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(datos)
+      .expect(409);
+    fixture.db.sesionCaja.updateMany.mockResolvedValueOnce({ count: 0 });
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(datos)
+      .expect(409);
+    expect(fixture.estado().ventas).toEqual([]);
+    expect(fixture.estado().creditos).toEqual([]);
+    expect(fixture.estado().detallesVenta).toEqual([]);
+    expect(fixture.estado().movimientos).toHaveLength(1);
+    expect(fixture.estado().cajas[0].cantidadVentas).toBe(0);
+    expect(
+      fixture.estado().secuencias.some((row) => row.tipo === 'FACTURA'),
+    ).toBe(false);
+    fixture.db.credito.create.mockRejectedValueOnce(fallo('P2034'));
+    const transaccion = vi.spyOn(fixture.db, '$transaction');
+    const creada = await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(datos)
+      .expect(201);
+    expect(transaccion).toHaveBeenCalledTimes(2);
+    expect(transaccion).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+    });
+    expect(creada.body.numeroFactura).toBe('F-0001');
+    expect(fixture.estado().creditos).toHaveLength(1);
+    expect(fixture.estado().ventas).toHaveLength(1);
+    expect(fixture.estado().cajas[0].totalCredito.toString()).toBe('288.65');
+    expect(fixture.estado().cajas[0].totalEfectivo.toString()).toBe('0');
+    transaccion.mockRestore();
   });
 
   async function crearOrdenParaRecibir() {
@@ -3186,12 +4488,6 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
     {
       modulo: 'usuarios',
       leer: ['ADMIN'],
-      crear: ['ADMIN'],
-      editar: ['ADMIN'],
-    },
-    {
-      modulo: 'creditos',
-      leer: ['ADMIN', 'CAJERO'],
       crear: ['ADMIN'],
       editar: ['ADMIN'],
     },
