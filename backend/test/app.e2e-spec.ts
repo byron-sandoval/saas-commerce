@@ -39,6 +39,7 @@ function baseSimulada() {
     ventas: [],
     detallesVenta: [],
     creditos: [],
+    abonos: [],
     devoluciones: [],
   };
   let impedirVinculo = false;
@@ -114,7 +115,47 @@ function baseSimulada() {
       : {}),
   });
   const db = {
+    abono: {
+      create: vi.fn(async ({ data }: Row) => {
+        if (
+          !buscar('creditos', {
+            empresaId: data.empresaId,
+            id: data.creditoId,
+          }) ||
+          !buscar('usuarios', { empresaId: data.empresaId, id: data.usuarioId })
+        )
+          throw error('P2003');
+        const row = {
+          id: randomUUID(),
+          fecha: new Date(),
+          referenciaPago: null,
+          descripcion: null,
+          ...limpiar(data),
+        };
+        state.abonos.push(row);
+        return row;
+      }),
+      findMany: vi.fn(async ({ where, skip, take }: Row) =>
+        state.abonos
+          .filter((row) =>
+            Object.entries(limpiar(where)).every(
+              ([key, value]) => row[key] === value,
+            ),
+          )
+          .sort(
+            (a, b) =>
+              b.fecha.getTime() - a.fecha.getTime() || a.id.localeCompare(b.id),
+          )
+          .slice(skip, skip + take),
+      ),
+    },
     credito: {
+      updateMany: vi.fn(async ({ where, data }: Row) => {
+        const row = buscar('creditos', where);
+        if (!row) return { count: 0 };
+        Object.assign(row, limpiar(data));
+        return { count: 1 };
+      }),
       create: vi.fn(async ({ data }: Row) => {
         if (state.creditos.some((row) => row.ventaId === data.ventaId))
           throw error('P2002');
@@ -3076,6 +3117,360 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
     expect(fixture.estado().cajas[0].totalCredito.toString()).toBe('288.65');
     expect(fixture.estado().cajas[0].totalEfectivo.toString()).toBe('0');
     transaccion.mockRestore();
+  });
+
+  async function prepararAbono() {
+    const datos = await prepararVenta();
+    const venta = await request(app.getHttpServer())
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(datosVentaCredito(datos.venta))
+      .expect(201);
+    return {
+      ...datos,
+      credito: venta.body.credito,
+      rutaAbonos: `/creditos/${venta.body.credito.id}/abonos`,
+    };
+  }
+
+  it('cobra pagos parciales y completos con los campos actuales sin alterar caja ni inventario', async () => {
+    const { rutaAbonos, credito, empresa, caja } = await prepararAbono();
+    const http = request(app.getHttpServer());
+    const cajasAntes = JSON.stringify(fixture.estado().cajas);
+    const movimientosAntes = JSON.stringify(fixture.estado().movimientos);
+    const primero = await http
+      .post(rutaAbonos)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({
+        monto: '50.10',
+        descripcion: ' Pago parcial ',
+        referenciaPago: ' REC-001 ',
+      })
+      .expect(201);
+    expect(primero.body).toMatchObject({
+      empresaId: empresa.id,
+      creditoId: credito.id,
+      usuarioId: 'usuario-1',
+      monto: '50.1',
+      saldoAnterior: '288.65',
+      saldoNuevo: '238.55',
+      metodoPago: 'EFECTIVO',
+      descripcion: 'Pago parcial',
+      referenciaPago: 'REC-001',
+    });
+    expect(primero.body).not.toHaveProperty('claveOperacion');
+    expect(primero.body).not.toHaveProperty('sesionCajaId');
+    const leido = await http
+      .get(`/creditos/${credito.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(leido.body).toMatchObject({
+      saldoPendiente: '238.55',
+      estado: 'PENDIENTE',
+    });
+    await http
+      .post(rutaAbonos)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ monto: '238.55' })
+      .expect(201);
+    const pagado = await http
+      .get(`/creditos/${credito.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(pagado.body).toMatchObject({
+      saldoPendiente: '0',
+      estado: 'PAGADO',
+    });
+    await http
+      .post(rutaAbonos)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ monto: '1' })
+      .expect(409);
+    const lista = await http
+      .get(rutaAbonos)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(lista.body.datos).toHaveLength(2);
+    const pagina = await http
+      .get(`${rutaAbonos}?pagina=2&limite=1`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(pagina.body).toMatchObject({ pagina: 2, limite: 1 });
+    expect(pagina.body.datos).toHaveLength(1);
+    expect(JSON.stringify(fixture.estado().cajas)).toBe(cajasAntes);
+    expect(JSON.stringify(fixture.estado().movimientos)).toBe(movimientosAntes);
+    const arqueo = await http
+      .get(`/caja/${caja.id}/arqueo`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(arqueo.body.efectivoEsperado).toBe('100');
+  });
+
+  it.each(['ADMIN', 'CAJERO', 'BODEGUERO'])(
+    'protege cobro e historial de abonos para %s',
+    async (nombre) => {
+      const { empresa, rutaAbonos } = await prepararAbono();
+      fixture.estado().usuarios[0].rolId = empresa.roles.find(
+        (rol: Row) => rol.nombre === nombre,
+      ).id;
+      const http = request(app.getHttpServer());
+      await http.post(rutaAbonos).send({ monto: '1' }).expect(401);
+      await http.get(rutaAbonos).expect(401);
+      await http
+        .post(rutaAbonos)
+        .set('x-usuario-prueba', 'usuario-1')
+        .set('x-role', 'ADMIN')
+        .send({ monto: '1' })
+        .expect(nombre === 'BODEGUERO' ? 403 : 201);
+      await http
+        .get(rutaAbonos)
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(nombre === 'BODEGUERO' ? 403 : 200);
+    },
+  );
+
+  it('rechaza montos invalidos, sobrepagos y campos que asigna el backend', async () => {
+    const { rutaAbonos } = await prepararAbono();
+    const http = request(app.getHttpServer());
+    for (const monto of [
+      undefined,
+      null,
+      1,
+      '0',
+      '-1',
+      '0.001',
+      '1e2',
+      '1\n',
+      '1000000000000',
+      '288.66',
+    ])
+      await http
+        .post(rutaAbonos)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ monto })
+        .expect(400);
+    for (const campo of [
+      'empresaId',
+      'usuarioId',
+      'creditoId',
+      'saldoAnterior',
+      'saldoNuevo',
+      'fecha',
+      'sesionCajaId',
+      'claveOperacion',
+    ])
+      await http
+        .post(rutaAbonos)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ monto: '1', [campo]: 'ajeno' })
+        .expect(400);
+    for (const extra of [
+      { metodoPago: null },
+      { metodoPago: 'CREDITO' },
+      { referenciaPago: null },
+      { descripcion: 4 },
+      { referenciaPago: 'x'.repeat(101) },
+      { descripcion: 'x'.repeat(401) },
+    ])
+      await http
+        .post(rutaAbonos)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ monto: '1', ...extra })
+        .expect(400);
+    for (const query of ['pagina=0', 'limite=101', 'empresaId=ajena'])
+      await http
+        .get(`${rutaAbonos}?${query}`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(400);
+    await http
+      .post('/creditos/invalido/abonos')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ monto: '1' })
+      .expect(400);
+    expect(fixture.estado().abonos).toEqual([]);
+    expect(fixture.estado().creditos[0].saldoPendiente.toString()).toBe(
+      '288.65',
+    );
+  });
+
+  it('separa abonos por empresa y exige caja propia abierta para cobrar', async () => {
+    const { empresa, rutaAbonos } = await prepararAbono();
+    await prepararVenta('usuario-2');
+    const http = request(app.getHttpServer());
+    await http
+      .post(rutaAbonos)
+      .set('x-usuario-prueba', 'usuario-2')
+      .send({ monto: '1' })
+      .expect(404);
+    await http.get(rutaAbonos).set('x-usuario-prueba', 'usuario-2').expect(404);
+    fixture
+      .estado()
+      .usuarios.push({
+        ...fixture.estado().usuarios[0],
+        id: 'usuario-3',
+        rolId: empresa.roles.find((rol: Row) => rol.nombre === 'CAJERO').id,
+      });
+    await http
+      .post(rutaAbonos)
+      .set('x-usuario-prueba', 'usuario-3')
+      .send({ monto: '1' })
+      .expect(409);
+    await http
+      .post('/caja')
+      .set('x-usuario-prueba', 'usuario-3')
+      .send({ efectivoInicial: '0' })
+      .expect(201);
+    const cobrado = await http
+      .post(rutaAbonos)
+      .set('x-usuario-prueba', 'usuario-3')
+      .send({ monto: '1' })
+      .expect(201);
+    expect(cobrado.body.usuarioId).toBe('usuario-3');
+    const caja = fixture
+      .estado()
+      .cajas.find((row) => row.abiertoPorId === 'usuario-3')!;
+    caja.estado = 'CERRADA';
+    await http
+      .post(rutaAbonos)
+      .set('x-usuario-prueba', 'usuario-3')
+      .send({ monto: '1' })
+      .expect(409);
+    expect(fixture.estado().abonos).toHaveLength(1);
+  });
+
+  it.each(['TARJETA', 'TRANSFERENCIA'])(
+    'registra un abono por %s',
+    async (metodoPago) => {
+      const { rutaAbonos } = await prepararAbono();
+      const respuesta = await request(app.getHttpServer())
+        .post(rutaAbonos)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ monto: '0.10', metodoPago, referenciaPago: 'REF-001' })
+        .expect(201);
+      expect(respuesta.body).toMatchObject({
+        monto: '0.1',
+        saldoNuevo: '288.55',
+        metodoPago,
+        referenciaPago: 'REF-001',
+      });
+    },
+  );
+
+  it('mantiene VENCIDO con saldo y cambia a PAGADO al liquidar; bloquea creditos cancelados y ventas anuladas', async () => {
+    const { rutaAbonos } = await prepararAbono();
+    const http = request(app.getHttpServer());
+    fixture.estado().creditos[0].fechaVencimiento = new Date('2000-01-01');
+    await http
+      .post(rutaAbonos)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ monto: '0.10' })
+      .expect(201);
+    expect(fixture.estado().creditos[0].estado).toBe('VENCIDO');
+    fixture.estado().creditos[0].estado = 'CANCELADO';
+    await http
+      .post(rutaAbonos)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ monto: '1' })
+      .expect(409);
+    fixture.estado().creditos[0].estado = 'VENCIDO';
+    fixture.estado().ventas[0].estado = 'ANULADA';
+    await http
+      .post(rutaAbonos)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ monto: '1' })
+      .expect(409);
+    fixture.estado().ventas[0].estado = 'COMPLETADA';
+    await http
+      .post(rutaAbonos)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ monto: '288.55' })
+      .expect(201);
+    expect(fixture.estado().creditos[0].estado).toBe('PAGADO');
+  });
+
+  it('revierte el saldo si falla el comprobante y reintenta conflictos sin duplicar abonos', async () => {
+    const { rutaAbonos } = await prepararAbono();
+    const fallo = (code: string) =>
+      new Prisma.PrismaClientKnownRequestError('Fallo simulado', {
+        code,
+        clientVersion: '7',
+      });
+    const cobrar = () =>
+      request(app.getHttpServer())
+        .post(rutaAbonos)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ monto: '50' });
+    fixture.db.abono.create.mockImplementationOnce(async () => {
+      fixture.estado().abonos.push({ id: 'incompleto' });
+      throw fallo('P2003');
+    });
+    await cobrar().expect(409);
+    expect(fixture.estado().creditos[0].saldoPendiente.toString()).toBe(
+      '288.65',
+    );
+    expect(fixture.estado().abonos).toEqual([]);
+    fixture.db.credito.updateMany.mockResolvedValueOnce({ count: 0 });
+    await cobrar().expect(409);
+    expect(fixture.estado().abonos).toEqual([]);
+    fixture.db.abono.create.mockRejectedValueOnce(fallo('P2034'));
+    const tx = vi.spyOn(fixture.db, '$transaction');
+    await cobrar().expect(201);
+    expect(tx).toHaveBeenCalledTimes(2);
+    expect(tx).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+    });
+    expect(fixture.estado().creditos[0].saldoPendiente.toString()).toBe(
+      '238.65',
+    );
+    expect(fixture.estado().abonos).toHaveLength(1);
+    tx.mockClear();
+    fixture.db.abono.create.mockRejectedValue(fallo('P2034'));
+    await cobrar().expect(409);
+    expect(tx).toHaveBeenCalledTimes(3);
+    expect(fixture.estado().creditos[0].saldoPendiente.toString()).toBe(
+      '238.65',
+    );
+    expect(fixture.estado().abonos).toHaveLength(1);
+    tx.mockRestore();
+  });
+
+  it('vuelve a leer la deuda tras un cobro concurrente e impide superar el saldo restante', async () => {
+    const { rutaAbonos } = await prepararAbono();
+    const fallo = new Prisma.PrismaClientKnownRequestError('Conflicto', {
+      code: 'P2034',
+      clientVersion: '7',
+    });
+    const tx = vi
+      .spyOn(fixture.db, '$transaction')
+      .mockImplementationOnce(async () => {
+        const credito = fixture.estado().creditos[0];
+        credito.saldoPendiente = new Prisma.Decimal('88.65');
+        fixture
+          .estado()
+          .abonos.push({
+            id: randomUUID(),
+            empresaId: credito.empresaId,
+            creditoId: credito.id,
+            usuarioId: 'usuario-1',
+            fecha: new Date(),
+            monto: new Prisma.Decimal('200'),
+            saldoAnterior: new Prisma.Decimal('288.65'),
+            saldoNuevo: credito.saldoPendiente,
+            metodoPago: 'EFECTIVO',
+          });
+        throw fallo;
+      });
+    await request(app.getHttpServer())
+      .post(rutaAbonos)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ monto: '150' })
+      .expect(400);
+    expect(tx).toHaveBeenCalledTimes(2);
+    expect(fixture.estado().creditos[0].saldoPendiente.toString()).toBe(
+      '88.65',
+    );
+    expect(fixture.estado().abonos).toHaveLength(1);
+    tx.mockRestore();
   });
 
   async function crearOrdenParaRecibir() {
