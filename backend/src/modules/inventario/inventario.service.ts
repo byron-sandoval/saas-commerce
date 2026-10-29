@@ -36,11 +36,12 @@ export class InventarioService {
   async agregarExistencias<T extends { id: string }>(
     empresaId: string,
     productos: T[],
+    db: Prisma.TransactionClient = this.prisma,
   ) {
     if (productos.length === 0) return [];
     // Cantidades con signo: entradas positivas, salidas negativas.
     // Una sola consulta agrupa los movimientos de todos los productos de la pagina.
-    const grupos = await this.prisma.movimientoAlmacen.groupBy({
+    const grupos = await db.movimientoAlmacen.groupBy({
       by: ['productoId'],
       where: {
         empresaId,
