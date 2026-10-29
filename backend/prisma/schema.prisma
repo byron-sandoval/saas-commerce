@@ -82,6 +82,7 @@ enum TipoMovimiento {
   DEVOLUCION_PROVEEDOR
   AJUSTE
   TRANSFERENCIA
+  ANULACION_VENTA
 }
 
 enum TipoDocumento {
@@ -99,6 +100,11 @@ enum MetodoPago {
 enum EstadoVenta {
   COMPLETADA
   ANULADA
+}
+
+enum TipoVenta {
+  CONTADO
+  CREDITO
 }
 
 enum EstadoOrdenCompra {
@@ -323,7 +329,8 @@ model Usuario {
 
   empresa             Empresa?            @relation(fields: [empresaId], references: [id])
   rol                 Rol?                @relation(fields: [empresaId, rolId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
-  ventas              Venta[]
+  ventas              Venta[]             @relation("VentaCreadaPor")
+  ventasAnuladas      Venta[]             @relation("VentaAnuladaPor")
   aperturasCaja       SesionCaja[]        @relation("CajaAbiertaPor")
   cierresCaja         SesionCaja[]        @relation("CajaCerradaPor")
   ordenesCompra       OrdenCompra[]       @relation("OrdenCreadaPor")
@@ -469,6 +476,7 @@ model SesionCaja {
   totalEfectivo    Decimal    @default(0) @db.Decimal(14, 2)
   totalTarjeta     Decimal    @default(0) @db.Decimal(14, 2)
   totalTransfer    Decimal    @default(0) @db.Decimal(14, 2)
+  totalCredito     Decimal    @default(0) @db.Decimal(14, 2)
   cantidadVentas   Int        @default(0)
   notas            String?
 
@@ -491,19 +499,24 @@ model Venta {
   montoDescuento  Decimal     @default(0) @db.Decimal(14, 2)
   montoIVA        Decimal     @default(0) @db.Decimal(14, 2)
   total           Decimal     @db.Decimal(14, 2)
-  metodoPago      MetodoPago  @default(EFECTIVO)
+  metodoPago      MetodoPago? @default(EFECTIVO)
+  tipoVenta       TipoVenta   @default(CONTADO)
   referenciaPago  String?     @db.VarChar(100)
   importeRecibido Decimal?    @db.Decimal(14, 2)
   cambio          Decimal?    @db.Decimal(14, 2)
   estado          EstadoVenta @default(COMPLETADA)
   usuarioId       String
+  anuladaPorId    String?
+  anuladaEn       DateTime?
+  motivoAnulacion String?     @db.VarChar(500)
   creadoEn        DateTime    @default(now())
   actualizadoEn   DateTime    @updatedAt
 
   empresa      Empresa             @relation(fields: [empresaId], references: [id])
   sesionCaja   SesionCaja          @relation(fields: [empresaId, sesionCajaId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
   cliente      Cliente             @relation(fields: [empresaId, clienteId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
-  usuario      Usuario             @relation(fields: [empresaId, usuarioId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  usuario      Usuario             @relation("VentaCreadaPor", fields: [empresaId, usuarioId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  anuladaPor   Usuario?            @relation("VentaAnuladaPor", fields: [empresaId, anuladaPorId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
   detalles     DetalleVenta[]
   movimientos  MovimientoAlmacen[]
   devoluciones Devolucion[]
