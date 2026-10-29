@@ -6,6 +6,7 @@ import {
   IsArray,
   IsIn,
   IsOptional,
+  IsObject,
   IsString,
   IsUUID,
   Length,
@@ -14,13 +15,24 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { DetalleVentaDto } from './detalle-venta.dto.js';
+import { CreateCreditoDto } from '../../creditos/dto/create-credito.dto.js';
 
 export class CreateVentaDto {
   @IsUUID('4')
   clienteId: string;
 
+  @IsIn(['CONTADO', 'CREDITO'])
+  tipoVenta: 'CONTADO' | 'CREDITO' = 'CONTADO';
+
+  @ValidateIf((_, value: unknown) => value !== undefined)
   @IsIn(['EFECTIVO', 'TARJETA', 'TRANSFERENCIA'])
-  metodoPago: 'EFECTIVO' | 'TARJETA' | 'TRANSFERENCIA' = 'EFECTIVO';
+  metodoPago?: 'EFECTIVO' | 'TARJETA' | 'TRANSFERENCIA';
+
+  @ValidateIf((_, value: unknown) => value !== undefined)
+  @IsObject()
+  @ValidateNested()
+  @Type(() => CreateCreditoDto)
+  credito?: CreateCreditoDto;
 
   @ValidateIf((_, value: unknown) => value !== undefined)
   @IsString()

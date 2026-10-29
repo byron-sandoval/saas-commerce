@@ -5,11 +5,12 @@ import { ClientesController } from './clientes.controller.js';
 import { ClientesService } from './clientes.service.js';
 import { PrismaModule } from '../../prisma/prisma.module.js';
 import { InventarioModule } from '../inventario/inventario.module.js';
+import { CreditosModule } from '../creditos/creditos.module.js';
 
 import { RolesModule } from '../roles/roles.module.js';
 
 @Module({
-  imports: [RolesModule, PrismaModule, InventarioModule],
+  imports: [RolesModule, PrismaModule, InventarioModule, CreditosModule],
   // Las rutas de clientes deben preceder a /ventas/:id.
   controllers: [ClientesController, VentasController],
   providers: [VentasService, ClientesService],

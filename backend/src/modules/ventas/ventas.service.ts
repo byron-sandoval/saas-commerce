@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -9,15 +10,43 @@ import { PrismaService } from '../../prisma/prisma.service.js';
 import { InventarioService } from '../inventario/inventario.service.js';
 import type { CreateVentaDto } from './dto/create-venta.dto.js';
 import type { ListarVentasDto } from './dto/listar-ventas.dto.js';
+import type { AnularVentaDto } from './dto/anular-venta.dto.js';
+import { CreditosService } from '../creditos/creditos.service.js';
 
 @Injectable()
 export class VentasService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly inventario: InventarioService,
+    private readonly creditos: CreditosService,
   ) {}
 
-  create(empresaId: string, usuarioId: string, dto: CreateVentaDto) {
+  create(
+    empresaId: string,
+    usuarioId: string,
+    dto: CreateVentaDto,
+    puedeCrearCredito = false,
+  ) {
+    const esCredito = dto.tipoVenta === 'CREDITO';
+    if (esCredito && !puedeCrearCredito)
+      throw new ForbiddenException(
+        'Solo ADMIN puede otorgar ventas a credito.',
+      );
+    if (
+      esCredito &&
+      (dto.metodoPago !== undefined ||
+        dto.importeRecibido !== undefined ||
+        dto.referenciaPago !== undefined)
+    ) {
+      throw new BadRequestException(
+        'Una venta a credito no recibe pago inicial en esta etapa. No envies metodoPago, importeRecibido ni referenciaPago.',
+      );
+    }
+    if (!esCredito && dto.credito !== undefined)
+      throw new BadRequestException(
+        'Las condiciones de credito solo se aceptan en ventas a credito.',
+      );
+    const metodoPago = esCredito ? null : (dto.metodoPago ?? 'EFECTIVO');
     return this.transaccion(async (tx) => {
       const caja = await tx.sesionCaja.findFirst({
         where: { empresaId, abiertoPorId: usuarioId, estado: 'ABIERTA' },
@@ -28,11 +57,15 @@ export class VentasService {
         );
       const cliente = await tx.cliente.findUnique({
         where: { empresaId_id: { empresaId, id: dto.clienteId }, activo: true },
-        select: { id: true },
+        select: { id: true, esGenerico: true },
       });
       if (!cliente)
         throw new BadRequestException(
           'El cliente no esta disponible en tu empresa.',
+        );
+      if (esCredito && cliente.esGenerico)
+        throw new BadRequestException(
+          'No se puede otorgar credito al cliente generico.',
         );
       const empresa = await tx.empresa.findUnique({
         where: { id: empresaId, estado: 'ACTIVA' },
@@ -101,13 +134,13 @@ export class VentasService {
         subtotal.times(empresa.porcentajeIva).dividedBy(100),
       );
       const total = this.dinero(subtotal.plus(montoIVA));
-      if (dto.metodoPago !== 'EFECTIVO' && dto.importeRecibido !== undefined) {
+      if (metodoPago !== 'EFECTIVO' && dto.importeRecibido !== undefined) {
         throw new BadRequestException(
           'importeRecibido solo se utiliza para pagos en efectivo.',
         );
       }
       const importeRecibido =
-        dto.metodoPago === 'EFECTIVO'
+        metodoPago === 'EFECTIVO'
           ? new Prisma.Decimal(dto.importeRecibido ?? total)
           : null;
       if (importeRecibido && importeRecibido.lessThan(total)) {
@@ -118,14 +151,18 @@ export class VentasService {
       const cambio = importeRecibido
         ? this.dinero(importeRecibido.minus(total))
         : null;
-      const campoPago =
-        dto.metodoPago === 'EFECTIVO'
+      const campoPago = esCredito
+        ? 'totalCredito'
+        : metodoPago === 'EFECTIVO'
           ? 'totalEfectivo'
-          : dto.metodoPago === 'TARJETA'
+          : metodoPago === 'TARJETA'
             ? 'totalTarjeta'
             : 'totalTransfer';
       this.dinero(caja.totalVentas.plus(total));
       this.dinero(caja[campoPago].plus(total));
+      if (metodoPago === 'EFECTIVO') {
+        this.dinero(caja.efectivoInicial.plus(caja.totalEfectivo).plus(total));
+      }
       const secuencia = await tx.secuencia.upsert({
         where: { empresaId_tipo: { empresaId, tipo: 'FACTURA' } },
         create: { empresaId, tipo: 'FACTURA', prefijo: 'F-', ultimoValor: 1 },
@@ -142,15 +179,19 @@ export class VentasService {
           montoIVA,
           montoDescuento: new Prisma.Decimal(0),
           total,
-          metodoPago: dto.metodoPago,
+          metodoPago,
+          tipoVenta: esCredito ? 'CREDITO' : 'CONTADO',
           referenciaPago: dto.referenciaPago,
           importeRecibido,
           cambio,
           estado: 'COMPLETADA',
           detalles: { create: detalles },
         },
-        include: { detalles: true },
+        include: { detalles: true, credito: true },
       });
+      const credito = esCredito
+        ? await this.creditos.crearDesdeVenta(tx, venta, dto.credito)
+        : null;
       await tx.movimientoAlmacen.createMany({
         data: detalles.map((detalle) => ({
           empresaId,
@@ -178,7 +219,137 @@ export class VentasService {
       });
       if (actualizada.count !== 1)
         throw new ConflictException('La caja ya no esta abierta.');
-      return venta;
+      return { ...venta, credito };
+    });
+  }
+
+  anular(
+    empresaId: string,
+    usuarioId: string,
+    id: string,
+    dto: AnularVentaDto,
+  ) {
+    return this.transaccion(async (tx) => {
+      const venta = await tx.venta.findUnique({
+        where: { empresaId_id: { empresaId, id } },
+        include: {
+          detalles: true,
+          credito: { select: { id: true } },
+          devoluciones: { select: { id: true } },
+          movimientos: { where: { tipo: 'VENTA' } },
+        },
+      });
+      if (!venta) throw new NotFoundException('Venta no encontrada.');
+      if (venta.estado !== 'COMPLETADA' || venta.anuladaEn !== null) {
+        throw new ConflictException(
+          'La venta ya esta anulada o no se puede anular.',
+        );
+      }
+      if (venta.credito || venta.devoluciones.length > 0) {
+        throw new ConflictException(
+          'Las ventas con credito o devoluciones vinculadas requieren un flujo de anulacion especifico.',
+        );
+      }
+      const caja = await tx.sesionCaja.findUnique({
+        where: { empresaId_id: { empresaId, id: venta.sesionCajaId } },
+      });
+      if (!caja || caja.estado !== 'ABIERTA') {
+        throw new ConflictException(
+          'Solo se pueden anular ventas cuya caja sigue abierta.',
+        );
+      }
+      const campoPago =
+        venta.metodoPago === 'EFECTIVO'
+          ? 'totalEfectivo'
+          : venta.metodoPago === 'TARJETA'
+            ? 'totalTarjeta'
+            : venta.metodoPago === 'TRANSFERENCIA'
+              ? 'totalTransfer'
+              : null;
+      if (
+        !campoPago ||
+        !venta.total.isFinite() ||
+        venta.total.isNegative() ||
+        caja.totalVentas.lessThan(venta.total) ||
+        caja[campoPago].lessThan(venta.total) ||
+        caja.cantidadVentas < 1
+      ) {
+        throw new ConflictException(
+          'Los acumulados de caja no permiten revertir esta venta.',
+        );
+      }
+      // Comprueba las salidas originales antes de generar sus movimientos inversos.
+      const salidas = new Map<string, Prisma.Decimal>();
+      for (const movimiento of venta.movimientos) {
+        if (!movimiento.cantidad.isNegative())
+          throw new ConflictException(
+            'La venta tiene movimientos de inventario inconsistentes.',
+          );
+        salidas.set(
+          movimiento.productoId,
+          (salidas.get(movimiento.productoId) ?? new Prisma.Decimal(0)).minus(
+            movimiento.cantidad,
+          ),
+        );
+      }
+      if (
+        venta.detalles.length === 0 ||
+        salidas.size !== venta.detalles.length ||
+        venta.detalles.some(
+          (detalle) =>
+            !detalle.cantidad.greaterThan(0) ||
+            !salidas.get(detalle.productoId)?.equals(detalle.cantidad),
+        )
+      )
+        throw new ConflictException(
+          'Las salidas de inventario no coinciden con los detalles de la venta.',
+        );
+      const anulada = await tx.venta.updateMany({
+        where: { empresaId, id, estado: 'COMPLETADA', anuladaEn: null },
+        data: {
+          estado: 'ANULADA',
+          anuladaPorId: usuarioId,
+          anuladaEn: new Date(),
+          motivoAnulacion: dto.motivo,
+        },
+      });
+      if (anulada.count !== 1)
+        throw new ConflictException('La venta ya fue modificada o anulada.');
+      await tx.movimientoAlmacen.createMany({
+        data: venta.movimientos.map((movimiento) => ({
+          empresaId,
+          usuarioId,
+          ventaId: id,
+          productoId: movimiento.productoId,
+          tipo: 'ANULACION_VENTA' as const,
+          cantidad: movimiento.cantidad.negated(),
+          costoUnidad: movimiento.costoUnidad,
+          nota: `Anulacion ${venta.numeroFactura}: ${dto.motivo}`,
+        })),
+      });
+      const actualizada = await tx.sesionCaja.updateMany({
+        where: {
+          empresaId,
+          id: caja.id,
+          estado: 'ABIERTA',
+          cantidadVentas: caja.cantidadVentas,
+          totalVentas: caja.totalVentas,
+          [campoPago]: caja[campoPago],
+        },
+        data: {
+          totalVentas: { increment: venta.total.negated() },
+          [campoPago]: { increment: venta.total.negated() },
+          cantidadVentas: { increment: -1 },
+        },
+      });
+      if (actualizada.count !== 1)
+        throw new ConflictException(
+          'La caja cambio durante la anulacion. Vuelve a consultarla.',
+        );
+      return tx.venta.findUniqueOrThrow({
+        where: { empresaId_id: { empresaId, id } },
+        include: { detalles: true },
+      });
     });
   }
 
@@ -208,7 +379,7 @@ export class VentasService {
         empresaId_id: { empresaId, id },
         usuarioId: esAdmin ? undefined : usuarioId,
       },
-      include: { detalles: true },
+      include: { detalles: true, credito: true },
     });
     if (!venta) throw new NotFoundException('Venta no encontrada.');
     return venta;
