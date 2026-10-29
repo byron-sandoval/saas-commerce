@@ -3,17 +3,19 @@ import {
   Get,
   Post,
   Body,
-  Patch,
   Param,
-  Delete,
   UseGuards,
+  Req,
+  Query,
+  ParseUUIDPipe,
 } from '@nestjs/common';
 import { CajaService } from './caja.service.js';
 import { CreateCajaDto } from './dto/create-caja.dto.js';
-import { UpdateCajaDto } from './dto/update-caja.dto.js';
+import { ListarCajasDto } from './dto/listar-cajas.dto.js';
 
 import { Roles } from '../roles/roles.decorator.js';
 import { RolesGuard } from '../roles/roles.guard.js';
+import type { SolicitudConUsuario } from '../roles/roles.guard.js';
 
 @Controller('caja')
 @UseGuards(RolesGuard)
@@ -22,28 +24,47 @@ export class CajaController {
   constructor(private readonly cajaService: CajaService) {}
 
   @Post()
-  create(@Body() createCajaDto: CreateCajaDto) {
-    return this.cajaService.create(createCajaDto);
+  create(@Req() request: SolicitudConUsuario, @Body() dto: CreateCajaDto) {
+    return this.cajaService.create(
+      request.usuario!.empresaId,
+      request.usuario!.id,
+      dto,
+    );
   }
 
   @Get()
-  findAll() {
-    return this.cajaService.findAll();
+  findAll(
+    @Req() request: SolicitudConUsuario,
+    @Query() consulta: ListarCajasDto,
+  ) {
+    const usuario = request.usuario!;
+    return this.cajaService.findAll(
+      usuario.empresaId,
+      usuario.id,
+      usuario.rol === 'ADMIN',
+      consulta,
+    );
+  }
+
+  @Get('actual')
+  findActual(@Req() request: SolicitudConUsuario) {
+    return this.cajaService.findActual(
+      request.usuario!.empresaId,
+      request.usuario!.id,
+    );
   }
 
   @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.cajaService.findOne(+id);
-  }
-
-  @Patch(':id')
-  update(@Param('id') id: string, @Body() updateCajaDto: UpdateCajaDto) {
-    return this.cajaService.update(+id, updateCajaDto);
-  }
-
-  @Delete(':id')
-  @Roles('ADMIN')
-  remove(@Param('id') id: string) {
-    return this.cajaService.remove(+id);
+  findOne(
+    @Req() request: SolicitudConUsuario,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+  ) {
+    const usuario = request.usuario!;
+    return this.cajaService.findOne(
+      usuario.empresaId,
+      usuario.id,
+      usuario.rol === 'ADMIN',
+      id,
+    );
   }
 }
