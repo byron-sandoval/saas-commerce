@@ -30,10 +30,14 @@ function baseSimulada() {
     categorias: [],
     unidades: [],
     proveedores: [],
+    clientes: [],
     ordenes: [],
     itemsCompra: [],
     secuencias: [],
     movimientos: [],
+    cajas: [],
+    ventas: [],
+    detallesVenta: [],
   };
   let impedirVinculo = false;
   const error = (code: string) =>
@@ -50,7 +54,9 @@ function baseSimulada() {
     delete filtro.empresaId_id;
     return (
       state[tabla].find((row) =>
-        Object.entries(filtro).every(([key, value]) => row[key] === value),
+        Object.entries(limpiar(filtro)).every(
+          ([key, value]) => row[key] === value,
+        ),
       ) ?? null
     );
   };
@@ -69,6 +75,147 @@ function baseSimulada() {
       });
   };
   const db = {
+    venta: {
+      create: vi.fn(async ({ data }: Row) => {
+        if (
+          state.ventas.some(
+            (row) =>
+              row.empresaId === data.empresaId &&
+              row.numeroFactura === data.numeroFactura,
+          )
+        )
+          throw error('P2002');
+        const { detalles, ...cabecera } = data;
+        const row: Row = { id: randomUUID(), ...limpiar(cabecera) };
+        state.ventas.push(row);
+        const items = detalles.create.map((detalle: Row) => ({
+          id: randomUUID(),
+          empresaId: row.empresaId,
+          ventaId: row.id,
+          ...detalle,
+        }));
+        state.detallesVenta.push(...items);
+        return { ...row, detalles: items };
+      }),
+      findUnique: vi.fn(async ({ where }: Row) => {
+        const row = buscar('ventas', where);
+        return row
+          ? {
+              ...row,
+              detalles: state.detallesVenta.filter(
+                (detalle) => detalle.ventaId === row.id,
+              ),
+            }
+          : null;
+      }),
+      findMany: vi.fn(async ({ where, skip, take }: Row) =>
+        state.ventas
+          .filter((row) =>
+            Object.entries(limpiar(where)).every(
+              ([key, value]) => row[key] === value,
+            ),
+          )
+          .slice(skip, skip + take),
+      ),
+    },
+    sesionCaja: {
+      updateMany: vi.fn(async ({ where, data }: Row) => {
+        const row = buscar('cajas', where);
+        if (!row) return { count: 0 };
+        for (const [key, value] of Object.entries(data)) {
+          if (value && typeof value === 'object' && 'increment' in value) {
+            row[key] =
+              typeof row[key] === 'number'
+                ? row[key] + (value as Row).increment
+                : row[key].plus((value as Row).increment);
+          } else row[key] = value;
+        }
+        return { count: 1 };
+      }),
+      create: vi.fn(async ({ data }: Row) => {
+        const row = {
+          id: randomUUID(),
+          abiertoEn: new Date(),
+          estado: 'ABIERTA',
+          cerradoPorId: null,
+          cerradoEn: null,
+          efectivoCierre: null,
+          efectivoEsperado: null,
+          diferencia: null,
+          totalVentas: new Prisma.Decimal(0),
+          totalEfectivo: new Prisma.Decimal(0),
+          totalTarjeta: new Prisma.Decimal(0),
+          totalTransfer: new Prisma.Decimal(0),
+          cantidadVentas: 0,
+          ...limpiar(data),
+        };
+        state.cajas.push(row);
+        return row;
+      }),
+      findFirst: vi.fn(async ({ where }: Row) => buscar('cajas', where)),
+      findUnique: vi.fn(async ({ where }: Row) => buscar('cajas', where)),
+      findMany: vi.fn(async ({ where, skip, take }: Row) =>
+        state.cajas
+          .filter((row) =>
+            Object.entries(limpiar(where)).every(
+              ([key, value]) => row[key] === value,
+            ),
+          )
+          .slice(skip, skip + take),
+      ),
+    },
+    cliente: {
+      create: vi.fn(async ({ data }: Row) => {
+        if (
+          data.tipoDocumento != null &&
+          data.numeroDocumento != null &&
+          state.clientes.some(
+            (row) =>
+              row.empresaId === data.empresaId &&
+              row.tipoDocumento === data.tipoDocumento &&
+              row.numeroDocumento === data.numeroDocumento,
+          )
+        )
+          throw error('P2002');
+        const row = {
+          id: randomUUID(),
+          activo: true,
+          esGenerico: false,
+          tipoDocumento: null,
+          numeroDocumento: null,
+          ...limpiar(data),
+        };
+        state.clientes.push(row);
+        return row;
+      }),
+      findUnique: vi.fn(async ({ where }: Row) => buscar('clientes', where)),
+      findMany: vi.fn(async ({ where, skip, take }: Row) =>
+        state.clientes
+          .filter((row) =>
+            Object.entries(where).every(([key, value]) => row[key] === value),
+          )
+          .slice(skip, skip + take),
+      ),
+      update: vi.fn(async ({ where, data }: Row) => {
+        const row = buscar('clientes', where);
+        if (!row) throw error('P2025');
+        const nuevo = { ...row, ...limpiar(data) };
+        if (
+          nuevo.tipoDocumento != null &&
+          nuevo.numeroDocumento != null &&
+          state.clientes.some(
+            (otro) =>
+              otro.id !== row.id &&
+              otro.empresaId === row.empresaId &&
+              otro.tipoDocumento === nuevo.tipoDocumento &&
+              otro.numeroDocumento === nuevo.numeroDocumento,
+          )
+        )
+          throw error('P2002');
+        Object.assign(row, limpiar(data));
+        return row;
+      }),
+    },
     movimientoAlmacen: {
       groupBy: vi.fn(async ({ where }: Row) => {
         const sumas = new Map<string, Prisma.Decimal>();
@@ -230,7 +377,12 @@ function baseSimulada() {
     empresa: {
       findUnique: vi.fn(async ({ where }: Row) => buscar('empresas', where)),
       create: vi.fn(async ({ data }: Row) => {
-        const row = { id: randomUUID(), estado: 'ACTIVA', ...limpiar(data) };
+        const row = {
+          id: randomUUID(),
+          estado: 'ACTIVA',
+          porcentajeIva: new Prisma.Decimal(15),
+          ...limpiar(data),
+        };
         state.empresas.push(row);
         return row;
       }),
@@ -432,6 +584,581 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
     return response.body;
   }
 
+  it('crea, pagina, consulta, edita y da de baja clientes sin eliminarlos', async () => {
+    const empresa = await crearEmpresa();
+    const base = '/ventas/clientes';
+    const http = request(app.getHttpServer());
+    await http.get(base).expect(401);
+    const creado = await http
+      .post(base)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({
+        nombre: ' Ana Lopez ',
+        tipoDocumento: 'CEDULA',
+        numeroDocumento: ' PRUEBA-001 ',
+        telefono: ' 8888-1234 ',
+        direccion: ' Managua ',
+      })
+      .expect(201);
+    const id = creado.body.id;
+    expect(creado.body).toMatchObject({
+      empresaId: empresa.id,
+      nombre: 'Ana Lopez',
+      numeroDocumento: 'PRUEBA-001',
+      tipoDocumento: 'CEDULA',
+      telefono: '8888-1234',
+      direccion: 'Managua',
+      activo: true,
+      esGenerico: false,
+    });
+    const listado = await http
+      .get(`${base}?pagina=1&limite=1`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(listado.body).toMatchObject({ pagina: 1, limite: 1 });
+    expect(listado.body.datos.map((row: Row) => row.id)).toEqual([id]);
+    const consultado = await http
+      .get(`${base}/${id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(consultado.body.nombre).toBe('Ana Lopez');
+    const editado = await http
+      .patch(`${base}/${id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ nombre: 'Ana Perez', telefono: null })
+      .expect(200);
+    expect(editado.body).toMatchObject({
+      nombre: 'Ana Perez',
+      telefono: null,
+      numeroDocumento: 'PRUEBA-001',
+      tipoDocumento: 'CEDULA',
+    });
+    const sinDocumento = await http
+      .patch(`${base}/${id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ tipoDocumento: null, numeroDocumento: null })
+      .expect(200);
+    expect(sinDocumento.body).toMatchObject({
+      tipoDocumento: null,
+      numeroDocumento: null,
+    });
+    await http
+      .delete(`${base}/${id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(204);
+    expect(fixture.estado().clientes).toHaveLength(1);
+    expect(fixture.estado().clientes[0].activo).toBe(false);
+    await http
+      .get(`${base}/${id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(404);
+    await http
+      .patch(`${base}/${id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ nombre: 'Inactivo' })
+      .expect(404);
+    await http
+      .delete(`${base}/${id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(404);
+    const activos = await http
+      .get(base)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(activos.body.datos).toEqual([]);
+  });
+
+  it('valida clientes y exige tipo y numero de documento coherentes tambien al editar', async () => {
+    await crearEmpresa();
+    const base = '/ventas/clientes';
+    const http = request(app.getHttpServer());
+    for (const body of [
+      {},
+      { nombre: null },
+      { nombre: '   ' },
+      { nombre: 'x'.repeat(51) },
+      { nombre: 'Ana', telefono: 123 },
+      { nombre: 'Ana', telefono: 'x'.repeat(16) },
+      { nombre: 'Ana', direccion: 'x'.repeat(151) },
+      { nombre: 'Ana', tipoDocumento: 'INVALIDO', numeroDocumento: 'PRUEBA' },
+      { nombre: 'Ana', tipoDocumento: 'CEDULA' },
+      { nombre: 'Ana', numeroDocumento: 'PRUEBA' },
+      {
+        nombre: 'Ana',
+        tipoDocumento: 'CEDULA',
+        numeroDocumento: 'x'.repeat(21),
+      },
+      { nombre: 'Ana', tipoDocumento: 'CEDULA', numeroDocumento: ' ' },
+      { nombre: 'Ana', empresaId: 'ajena' },
+      { nombre: 'Ana', activo: false },
+      { nombre: 'Ana', esGenerico: true },
+      { nombre: 'Ana', rolId: 'ADMIN' },
+    ])
+      await http
+        .post(base)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send(body)
+        .expect(400);
+    expect(fixture.estado().clientes).toEqual([]);
+    const creado = await http
+      .post(base)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ nombre: 'Ana' })
+      .expect(201);
+    const id = creado.body.id;
+    for (const body of [
+      { nombre: null },
+      { activo: true },
+      { empresaId: 'ajena' },
+      { tipoDocumento: 'CEDULA' },
+      { numeroDocumento: 'PRUEBA' },
+    ]) {
+      await http
+        .patch(`${base}/${id}`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send(body)
+        .expect(400);
+    }
+    await http
+      .patch(`${base}/${id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ tipoDocumento: 'PASAPORTE', numeroDocumento: 'PAS-001' })
+      .expect(200);
+    await http
+      .patch(`${base}/${id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ tipoDocumento: null })
+      .expect(400);
+    await http
+      .patch(`${base}/${id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ numeroDocumento: null })
+      .expect(400);
+    const numeroEditado = await http
+      .patch(`${base}/${id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ numeroDocumento: 'PAS-002' })
+      .expect(200);
+    expect(numeroEditado.body).toMatchObject({
+      tipoDocumento: 'PASAPORTE',
+      numeroDocumento: 'PAS-002',
+    });
+    for (const query of ['pagina=0', 'limite=101', 'empresaId=ajena']) {
+      await http
+        .get(`${base}?${query}`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(400);
+    }
+    await http
+      .get(`${base}/invalido`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(400);
+    await http
+      .get(`${base}/${randomUUID()}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(404);
+  });
+
+  it('aisla clientes entre empresas y evita documentos duplicados incluso al editar', async () => {
+    await crearEmpresa();
+    await crearEmpresa('usuario-2');
+    const http = request(app.getHttpServer());
+    const base = '/ventas/clientes';
+    const cliente = {
+      nombre: 'Ana',
+      tipoDocumento: 'CEDULA',
+      numeroDocumento: 'PRUEBA-001',
+    };
+    const creado = await http
+      .post(base)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(cliente)
+      .expect(201);
+    await http
+      .post(base)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(cliente)
+      .expect(409);
+    await http
+      .post(base)
+      .set('x-usuario-prueba', 'usuario-2')
+      .send(cliente)
+      .expect(201);
+    const otro = await http
+      .post(base)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ nombre: 'Luis' })
+      .expect(201);
+    await http
+      .patch(`${base}/${otro.body.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ tipoDocumento: 'CEDULA', numeroDocumento: 'PRUEBA-001' })
+      .expect(409);
+    expect(
+      fixture.estado().clientes.find((row) => row.id === otro.body.id)
+        ?.tipoDocumento,
+    ).toBeNull();
+    for (const method of ['get', 'patch', 'delete'] as const) {
+      const req = http[method](`${base}/${creado.body.id}`).set(
+        'x-usuario-prueba',
+        'usuario-2',
+      );
+      if (method === 'patch') req.send({ nombre: 'Ajeno' });
+      await req.expect(404);
+    }
+    const lista = await http
+      .get(base)
+      .set('x-usuario-prueba', 'usuario-2')
+      .expect(200);
+    expect(lista.body.datos).toHaveLength(1);
+    expect(lista.body.datos[0].id).not.toBe(creado.body.id);
+  });
+
+  it.each(['CAJERO', 'BODEGUERO'])(
+    'aplica permisos de clientes para %s',
+    async (nombre) => {
+      const empresa = await crearEmpresa();
+      const base = '/ventas/clientes';
+      const http = request(app.getHttpServer());
+      const creado = await http
+        .post(base)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ nombre: 'Ana' })
+        .expect(201);
+      fixture.estado().usuarios[0].rolId = empresa.roles.find(
+        (rol: Row) => rol.nombre === nombre,
+      ).id;
+      for (const path of [base, `${base}/${creado.body.id}`]) {
+        await http.get(path).expect(401);
+        await http
+          .get(path)
+          .set('x-usuario-prueba', 'usuario-1')
+          .expect(nombre === 'CAJERO' ? 200 : 403);
+      }
+      await http
+        .post(base)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ nombre: 'Luis' })
+        .expect(403);
+      await http
+        .patch(`${base}/${creado.body.id}`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ nombre: 'Otro' })
+        .expect(403);
+      await http
+        .delete(`${base}/${creado.body.id}`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(403);
+      expect(fixture.estado().clientes).toHaveLength(1);
+      expect(fixture.estado().clientes[0]).toMatchObject({
+        nombre: 'Ana',
+        activo: true,
+      });
+    },
+  );
+
+  it('abre una caja con decimales, permite consultarla y bloquea otra apertura del mismo usuario', async () => {
+    const empresa = await crearEmpresa();
+    const http = request(app.getHttpServer());
+    await http
+      .get('/caja/actual')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(404);
+    const abierta = await http
+      .post('/caja')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoInicial: '500.10', notas: 'Fondo inicial de prueba' })
+      .expect(201);
+    expect(abierta.body).toMatchObject({
+      empresaId: empresa.id,
+      abiertoPorId: 'usuario-1',
+      estado: 'ABIERTA',
+      efectivoInicial: '500.1',
+      totalVentas: '0',
+      totalEfectivo: '0',
+      totalTarjeta: '0',
+      totalTransfer: '0',
+      cantidadVentas: 0,
+      cerradoEn: null,
+      cerradoPorId: null,
+      notas: 'Fondo inicial de prueba',
+    });
+    const actual = await http
+      .get('/caja/actual')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(actual.body.id).toBe(abierta.body.id);
+    await http
+      .get(`/caja/${abierta.body.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    await http
+      .post('/caja')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoInicial: '0' })
+      .expect(409);
+    expect(fixture.estado().cajas).toHaveLength(1);
+    // Simula una caja historica cerrada; el cierre HTTP se implementara despues.
+    fixture.estado().cajas[0].estado = 'CERRADA';
+    await http
+      .get('/caja/actual')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(404);
+    await http
+      .post('/caja')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoInicial: '0' })
+      .expect(201);
+    const lista = await http
+      .get('/caja?estado=CERRADA&pagina=1&limite=1')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(lista.body.datos.map((row: Row) => row.id)).toEqual([
+      abierta.body.id,
+    ]);
+    expect(lista.body).toMatchObject({ pagina: 1, limite: 1 });
+  });
+
+  it('valida el fondo inicial y rechaza campos de control en la apertura de caja', async () => {
+    await crearEmpresa();
+    const http = request(app.getHttpServer());
+    for (const efectivoInicial of [
+      undefined,
+      null,
+      500,
+      '-1',
+      '1.001',
+      '1000000000000',
+      '1e2',
+      '',
+      'NaN',
+      '1\n',
+    ]) {
+      await http
+        .post('/caja')
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ efectivoInicial })
+        .expect(400);
+    }
+    for (const campo of [
+      'empresaId',
+      'abiertoPorId',
+      'cerradoPorId',
+      'estado',
+      'abiertoEn',
+      'cerradoEn',
+      'totalVentas',
+      'efectivoCierre',
+      'efectivoEsperado',
+      'diferencia',
+      'cantidadVentas',
+    ]) {
+      await http
+        .post('/caja')
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ efectivoInicial: '100', [campo]: 'valor-no-permitido' })
+        .expect(400);
+    }
+    await http
+      .post('/caja')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoInicial: '100', notas: 123 })
+      .expect(400);
+    expect(fixture.estado().cajas).toEqual([]);
+    for (const query of [
+      'pagina=0',
+      'limite=101',
+      'estado=INVALIDO',
+      'empresaId=ajena',
+      'esAdmin=true',
+    ]) {
+      await http
+        .get(`/caja?${query}`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(400);
+    }
+    await http
+      .get('/caja/invalido')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(400);
+    await http
+      .get(`/caja/${randomUUID()}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(404);
+    const maxima = await http
+      .post('/caja')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoInicial: '999999999999.99' })
+      .expect(201);
+    expect(maxima.body.efectivoInicial).toBe('999999999999.99');
+  });
+
+  it('limita cajeros a sus propias cajas y permite a ADMIN consultar solo las de su empresa', async () => {
+    const empresa = await crearEmpresa();
+    fixture
+      .estado()
+      .usuarios.push({ ...fixture.estado().usuarios[1], id: 'usuario-3' });
+    await crearEmpresa('usuario-3');
+    Object.assign(fixture.estado().usuarios[1], {
+      empresaId: empresa.id,
+      rolId: empresa.roles.find((rol: Row) => rol.nombre === 'CAJERO').id,
+    });
+    const http = request(app.getHttpServer());
+    const cajas: Record<string, Row> = {};
+    for (const usuario of ['usuario-1', 'usuario-2', 'usuario-3']) {
+      const response = await http
+        .post('/caja')
+        .set('x-usuario-prueba', usuario)
+        .send({ efectivoInicial: '100' })
+        .expect(201);
+      cajas[usuario] = response.body;
+    }
+    const admin = await http
+      .get('/caja')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(admin.body.datos.map((row: Row) => row.id).sort()).toEqual(
+      [cajas['usuario-1'].id, cajas['usuario-2'].id].sort(),
+    );
+    const cajero = await http
+      .get('/caja')
+      .set('x-usuario-prueba', 'usuario-2')
+      .set('x-role', 'ADMIN')
+      .expect(200);
+    expect(cajero.body.datos.map((row: Row) => row.id)).toEqual([
+      cajas['usuario-2'].id,
+    ]);
+    await http
+      .get(`/caja/${cajas['usuario-1'].id}`)
+      .set('x-usuario-prueba', 'usuario-2')
+      .set('x-role', 'ADMIN')
+      .expect(404);
+    await http
+      .get(`/caja/${cajas['usuario-2'].id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    await http
+      .get(`/caja/${cajas['usuario-3'].id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(404);
+    await http
+      .get(`/caja/${cajas['usuario-1'].id}`)
+      .set('x-usuario-prueba', 'usuario-3')
+      .expect(404);
+    const actual = await http
+      .get('/caja/actual')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(actual.body.id).toBe(cajas['usuario-1'].id);
+    const pagina = await http
+      .get('/caja?pagina=2&limite=1')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(pagina.body.datos).toHaveLength(1);
+  });
+
+  it.each(['ADMIN', 'CAJERO', 'BODEGUERO'])(
+    'aplica permisos y exige sesion en apertura y consultas de caja para %s',
+    async (nombre) => {
+      const empresa = await crearEmpresa();
+      fixture.estado().usuarios[0].rolId = empresa.roles.find(
+        (rol: Row) => rol.nombre === nombre,
+      ).id;
+      const http = request(app.getHttpServer());
+      await http.post('/caja').send({ efectivoInicial: '0' }).expect(401);
+      const creada = await http
+        .post('/caja')
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ efectivoInicial: '0' })
+        .expect(nombre === 'BODEGUERO' ? 403 : 201);
+      const id = nombre === 'BODEGUERO' ? randomUUID() : creada.body.id;
+      for (const path of ['/caja', '/caja/actual', `/caja/${id}`]) {
+        await http.get(path).expect(401);
+        await http
+          .get(path)
+          .set('x-usuario-prueba', 'usuario-1')
+          .expect(nombre === 'BODEGUERO' ? 403 : 200);
+      }
+      expect(fixture.estado().cajas).toHaveLength(
+        nombre === 'BODEGUERO' ? 0 : 1,
+      );
+    },
+  );
+
+  it('revierte aperturas fallidas y reintenta conflictos serializables sin dejar cajas duplicadas', async () => {
+    await crearEmpresa();
+    const http = request(app.getHttpServer());
+    const fallo = (code: string) =>
+      new Prisma.PrismaClientKnownRequestError('Fallo simulado', {
+        code,
+        clientVersion: '7',
+      });
+    fixture.db.sesionCaja.create.mockImplementationOnce(async () => {
+      fixture.estado().cajas.push({ id: 'incompleta' });
+      throw fallo('P2003');
+    });
+    await http
+      .post('/caja')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoInicial: '20.10' })
+      .expect(409);
+    expect(fixture.estado().cajas).toEqual([]);
+    fixture.db.sesionCaja.create.mockImplementationOnce(async () => {
+      fixture.estado().cajas.push({ id: 'incompleta' });
+      throw fallo('P2034');
+    });
+    const transaccion = vi.spyOn(fixture.db, '$transaction');
+    await http
+      .post('/caja')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoInicial: '20.10' })
+      .expect(201);
+    expect(transaccion).toHaveBeenCalledTimes(2);
+    expect(transaccion).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+    });
+    expect(fixture.estado().cajas).toHaveLength(1);
+    expect(fixture.estado().cajas[0].efectivoInicial.toString()).toBe('20.1');
+    transaccion.mockRestore();
+  });
+
+  it('detecta una caja abierta por otra solicitud al reintentar y limita los reintentos', async () => {
+    const empresa = await crearEmpresa();
+    const fallo = () =>
+      new Prisma.PrismaClientKnownRequestError('Conflicto simulado', {
+        code: 'P2034',
+        clientVersion: '7',
+      });
+    const transaccion = vi
+      .spyOn(fixture.db, '$transaction')
+      .mockImplementationOnce(async () => {
+        // Representa el resultado confirmado de otra solicitud de apertura.
+        fixture.estado().cajas.push({
+          id: randomUUID(),
+          empresaId: empresa.id,
+          abiertoPorId: 'usuario-1',
+          estado: 'ABIERTA',
+        });
+        throw fallo();
+      });
+    const http = request(app.getHttpServer());
+    await http
+      .post('/caja')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoInicial: '0' })
+      .expect(409);
+    expect(fixture.db.sesionCaja.create).not.toHaveBeenCalled();
+    expect(fixture.estado().cajas).toHaveLength(1);
+    transaccion.mockClear().mockRejectedValue(fallo());
+    await http
+      .post('/caja')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoInicial: '0' })
+      .expect(409);
+    expect(transaccion).toHaveBeenCalledTimes(3);
+    transaccion.mockRestore();
+  });
+
   async function prepararCompra(usuario = 'usuario-1') {
     const empresa = await crearEmpresa(usuario);
     const http = request(app.getHttpServer());
@@ -460,6 +1187,594 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
       },
     };
   }
+
+  async function prepararVenta(usuario = 'usuario-1') {
+    const compra = await prepararCompra(usuario);
+    const http = request(app.getHttpServer());
+    const orden = await http
+      .post('/compras')
+      .set('x-usuario-prueba', usuario)
+      .send({
+        ...compra.dto,
+        items: [{ ...compra.dto.items[0], cantidadSolicitada: '10.000' }],
+      })
+      .expect(201);
+    await http
+      .post(`/compras/${orden.body.id}/recibir`)
+      .set('x-usuario-prueba', usuario)
+      .expect(200);
+    const cliente = await http
+      .post('/ventas/clientes')
+      .set('x-usuario-prueba', usuario)
+      .send({ nombre: 'Cliente de ventas' })
+      .expect(201);
+    const caja = await http
+      .post('/caja')
+      .set('x-usuario-prueba', usuario)
+      .send({ efectivoInicial: '100.00' })
+      .expect(201);
+    return {
+      ...compra,
+      cliente: cliente.body,
+      caja: caja.body,
+      venta: {
+        clienteId: cliente.body.id,
+        metodoPago: 'EFECTIVO',
+        importeRecibido: '500.00',
+        detalles: [{ productoId: compra.articulo.id, cantidad: '2.000' }],
+      },
+    };
+  }
+
+  it('registra venta, IVA, cambio, factura y salida de inventario junto con los totales de caja', async () => {
+    const { venta, empresa, caja, articulo } = await prepararVenta();
+    const http = request(app.getHttpServer());
+    const creada = await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(venta)
+      .expect(201);
+    expect(creada.body).toMatchObject({
+      empresaId: empresa.id,
+      usuarioId: 'usuario-1',
+      sesionCajaId: caja.id,
+      numeroFactura: 'F-0001',
+      estado: 'COMPLETADA',
+      subtotal: '251',
+      montoDescuento: '0',
+      montoIVA: '37.65',
+      total: '288.65',
+      importeRecibido: '500',
+      cambio: '211.35',
+    });
+    expect(creada.body.detalles).toHaveLength(1);
+    expect(creada.body.detalles[0]).toMatchObject({
+      productoId: articulo.id,
+      empresaId: empresa.id,
+      ventaId: creada.body.id,
+      cantidad: '2',
+      precioUnitario: '125.5',
+      costoEnVenta: '80.25',
+      subtotal: '251',
+    });
+    const movimientos = fixture
+      .estado()
+      .movimientos.filter((row) => row.tipo === 'VENTA');
+    expect(movimientos).toHaveLength(1);
+    expect(movimientos[0]).toMatchObject({
+      ventaId: creada.body.id,
+      empresaId: empresa.id,
+      usuarioId: 'usuario-1',
+    });
+    expect(movimientos[0].cantidad.toString()).toBe('-2');
+    const cajaActual = await http
+      .get('/caja/actual')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(cajaActual.body).toMatchObject({
+      efectivoInicial: '100',
+      totalVentas: '288.65',
+      totalEfectivo: '288.65',
+      totalTarjeta: '0',
+      totalTransfer: '0',
+      cantidadVentas: 1,
+    });
+    const stock = await http
+      .get(`${ruta}/${articulo.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(stock.body.stockDisponible).toBe('8');
+    const detalle = await http
+      .get(`/ventas/${creada.body.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(detalle.body.detalles[0].id).toBe(creada.body.detalles[0].id);
+    const segunda = await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ ...venta, detalles: [{ ...venta.detalles[0], cantidad: '1' }] })
+      .expect(201);
+    expect(segunda.body.numeroFactura).toBe('F-0002');
+    const listado = await http
+      .get('/ventas?estado=COMPLETADA&pagina=1&limite=1')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(listado.body.datos).toHaveLength(1);
+    expect(listado.body).toMatchObject({ pagina: 1, limite: 1 });
+  });
+
+  it.each(['TARJETA', 'TRANSFERENCIA'])(
+    'registra pago por %s en su acumulado de caja sin aumentar el efectivo',
+    async (metodoPago) => {
+      const { venta } = await prepararVenta();
+      const { importeRecibido: _importe, ...sinEfectivo } = venta;
+      const http = request(app.getHttpServer());
+      const creada = await http
+        .post('/ventas')
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ ...sinEfectivo, metodoPago, referenciaPago: ' REF-PRUEBA ' })
+        .expect(201);
+      expect(creada.body).toMatchObject({
+        metodoPago,
+        importeRecibido: null,
+        cambio: null,
+        referenciaPago: 'REF-PRUEBA',
+        total: '288.65',
+      });
+      const caja = await http
+        .get('/caja/actual')
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(200);
+      expect(caja.body).toMatchObject({
+        totalVentas: '288.65',
+        totalEfectivo: '0',
+        cantidadVentas: 1,
+        totalTarjeta: metodoPago === 'TARJETA' ? '288.65' : '0',
+        totalTransfer: metodoPago === 'TRANSFERENCIA' ? '288.65' : '0',
+      });
+    },
+  );
+
+  it('redondea detalles e IVA con Decimal y conserva precios historicos', async () => {
+    const { venta } = await prepararVenta();
+    const http = request(app.getHttpServer());
+    fixture.estado().productos[0].precioBase = new Prisma.Decimal('12.35');
+    const { importeRecibido: _importe, metodoPago: _metodo, ...base } = venta;
+    const primera = await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({
+        ...base,
+        detalles: [{ ...venta.detalles[0], cantidad: '0.125' }],
+      })
+      .expect(201);
+    expect(primera.body).toMatchObject({
+      subtotal: '1.54',
+      montoIVA: '0.23',
+      total: '1.77',
+      importeRecibido: '1.77',
+      cambio: '0',
+    });
+    fixture.estado().empresas[0].porcentajeIva = new Prisma.Decimal(0);
+    fixture.estado().productos[0].precioBase = new Prisma.Decimal('0.10');
+    const segunda = await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({
+        ...base,
+        detalles: [{ ...venta.detalles[0], cantidad: '0.300' }],
+      })
+      .expect(201);
+    expect(segunda.body).toMatchObject({
+      subtotal: '0.03',
+      montoIVA: '0',
+      total: '0.03',
+    });
+    const historica = await http
+      .get(`/ventas/${primera.body.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(historica.body.detalles[0].precioUnitario).toBe('12.35');
+  });
+
+  it('valida cantidades y pagos y rechaza precios, totales y datos de control del cliente', async () => {
+    const { venta } = await prepararVenta();
+    const http = request(app.getHttpServer());
+    const item = venta.detalles[0];
+    const invalidos = [
+      {},
+      { ...venta, detalles: [] },
+      { ...venta, detalles: null },
+      { ...venta, detalles: [null] },
+      { ...venta, detalles: [item, item] },
+      { ...venta, detalles: Array(101).fill(item) },
+      { ...venta, clienteId: null },
+      { ...venta, metodoPago: 'OTRO' },
+      { ...venta, referenciaPago: 'X'.repeat(101) },
+      ...['0', '-1', '0.000', '1.0001', '100000000000', '1\n', 1].map(
+        (cantidad) => ({ ...venta, detalles: [{ ...item, cantidad }] }),
+      ),
+      ...[null, '-1', '1.001', '1000000000000', '1\n', 1].map(
+        (importeRecibido) => ({ ...venta, importeRecibido }),
+      ),
+      ...['precioUnitario', 'costoEnVenta', 'subtotal', 'empresaId'].map(
+        (campo) => ({ ...venta, detalles: [{ ...item, [campo]: '1' }] }),
+      ),
+      ...[
+        'empresaId',
+        'usuarioId',
+        'sesionCajaId',
+        'numeroFactura',
+        'subtotal',
+        'montoIVA',
+        'total',
+        'montoDescuento',
+        'estado',
+        'cambio',
+      ].map((campo) => ({ ...venta, [campo]: 'valor-no-permitido' })),
+    ];
+    for (const body of invalidos)
+      await http
+        .post('/ventas')
+        .set('x-usuario-prueba', 'usuario-1')
+        .send(body)
+        .expect(400);
+    expect(fixture.estado().ventas).toEqual([]);
+    expect(fixture.estado().detallesVenta).toEqual([]);
+    expect(fixture.estado().movimientos).toHaveLength(1);
+    expect(fixture.estado().cajas[0].cantidadVentas).toBe(0);
+    for (const query of [
+      'pagina=0',
+      'limite=101',
+      'estado=INVALIDO',
+      'empresaId=ajena',
+      'esAdmin=true',
+    ]) {
+      await http
+        .get(`/ventas?${query}`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(400);
+    }
+    await http
+      .get('/ventas/invalido')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(400);
+    await http
+      .get(`/ventas/${randomUUID()}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(404);
+  });
+
+  it('exige caja propia abierta, cliente y producto activos y un pago suficiente', async () => {
+    const { venta } = await prepararVenta();
+    const http = request(app.getHttpServer());
+    fixture.estado().cajas[0].estado = 'CERRADA';
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(venta)
+      .expect(409);
+    fixture.estado().cajas[0].estado = 'ABIERTA';
+    Object.assign(fixture.estado().usuarios[1], {
+      empresaId: fixture.estado().usuarios[0].empresaId,
+      rolId: fixture.estado().usuarios[0].rolId,
+    });
+    fixture.estado().cajas[0].abiertoPorId = 'usuario-2';
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(venta)
+      .expect(409);
+    fixture.estado().cajas[0].abiertoPorId = 'usuario-1';
+    for (const tabla of ['clientes', 'productos']) {
+      fixture.estado()[tabla][0].activo = false;
+      await http
+        .post('/ventas')
+        .set('x-usuario-prueba', 'usuario-1')
+        .send(venta)
+        .expect(400);
+      fixture.estado()[tabla][0].activo = true;
+    }
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ ...venta, importeRecibido: '1' })
+      .expect(400);
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ ...venta, metodoPago: 'TARJETA' })
+      .expect(400);
+    expect(fixture.estado().ventas).toEqual([]);
+    expect(
+      fixture.estado().secuencias.some((row) => row.tipo === 'FACTURA'),
+    ).toBe(false);
+  });
+
+  it('evita vender mas existencias de las disponibles y no deja una venta parcial', async () => {
+    const { venta, articulo } = await prepararVenta();
+    const http = request(app.getHttpServer());
+    const sinStock = await http
+      .post(ruta)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ ...producto, sku: 'SIN-STOCK' })
+      .expect(201);
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({
+        ...venta,
+        detalles: [
+          ...venta.detalles,
+          { productoId: sinStock.body.id, cantidad: '1' },
+        ],
+      })
+      .expect(409);
+    expect(fixture.estado().ventas).toEqual([]);
+    const seis = {
+      ...venta,
+      importeRecibido: '1000',
+      detalles: [{ ...venta.detalles[0], cantidad: '6' }],
+    };
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(seis)
+      .expect(201);
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(seis)
+      .expect(409);
+    expect(fixture.estado().ventas).toHaveLength(1);
+    const stock = await http
+      .get(`/inventario/${articulo.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(stock.body.stockDisponible).toBe('4');
+  });
+
+  it('separa clientes, productos, facturas y ventas entre empresas', async () => {
+    const propia = await prepararVenta();
+    const ajena = await prepararVenta('usuario-2');
+    const http = request(app.getHttpServer());
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ ...propia.venta, clienteId: ajena.cliente.id })
+      .expect(400);
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({
+        ...propia.venta,
+        detalles: [{ productoId: ajena.articulo.id, cantidad: '1' }],
+      })
+      .expect(400);
+    const primera = await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(propia.venta)
+      .expect(201);
+    const segunda = await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-2')
+      .send(ajena.venta)
+      .expect(201);
+    expect(primera.body.numeroFactura).toBe('F-0001');
+    expect(segunda.body.numeroFactura).toBe('F-0001');
+    await http
+      .get(`/ventas/${primera.body.id}`)
+      .set('x-usuario-prueba', 'usuario-2')
+      .expect(404);
+    const lista = await http
+      .get('/ventas')
+      .set('x-usuario-prueba', 'usuario-2')
+      .expect(200);
+    expect(lista.body.datos.map((row: Row) => row.id)).toEqual([
+      segunda.body.id,
+    ]);
+  });
+
+  it.each(['ADMIN', 'CAJERO', 'BODEGUERO'])(
+    'aplica permisos de venta para %s',
+    async (nombre) => {
+      const { venta, empresa } = await prepararVenta();
+      fixture.estado().usuarios[0].rolId = empresa.roles.find(
+        (rol: Row) => rol.nombre === nombre,
+      ).id;
+      const http = request(app.getHttpServer());
+      await http.post('/ventas').send(venta).expect(401);
+      await http.get('/ventas').expect(401);
+      const creada = await http
+        .post('/ventas')
+        .set('x-usuario-prueba', 'usuario-1')
+        .send(venta)
+        .expect(nombre === 'BODEGUERO' ? 403 : 201);
+      await http
+        .get('/ventas')
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(nombre === 'BODEGUERO' ? 403 : 200);
+      const id = nombre === 'BODEGUERO' ? randomUUID() : creada.body.id;
+      await http
+        .get(`/ventas/${id}`)
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(nombre === 'BODEGUERO' ? 403 : 200);
+      expect(fixture.estado().ventas).toHaveLength(
+        nombre === 'BODEGUERO' ? 0 : 1,
+      );
+    },
+  );
+
+  it('permite a ADMIN consultar ventas de su empresa y a CAJERO solo las propias', async () => {
+    const { venta, empresa } = await prepararVenta();
+    const http = request(app.getHttpServer());
+    const admin = await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(venta)
+      .expect(201);
+    const rolCajero = empresa.roles.find(
+      (rol: Row) => rol.nombre === 'CAJERO',
+    ).id;
+    Object.assign(fixture.estado().usuarios[1], {
+      empresaId: empresa.id,
+      rolId: rolCajero,
+    });
+    await http
+      .post('/caja')
+      .set('x-usuario-prueba', 'usuario-2')
+      .send({ efectivoInicial: '0' })
+      .expect(201);
+    const cajero = await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-2')
+      .send(venta)
+      .expect(201);
+    await http
+      .get(`/ventas/${admin.body.id}`)
+      .set('x-usuario-prueba', 'usuario-2')
+      .set('x-role', 'ADMIN')
+      .expect(404);
+    const propias = await http
+      .get('/ventas')
+      .set('x-usuario-prueba', 'usuario-2')
+      .expect(200);
+    expect(propias.body.datos.map((row: Row) => row.id)).toEqual([
+      cajero.body.id,
+    ]);
+    await http
+      .get(`/ventas/${cajero.body.id}`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    const todas = await http
+      .get('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(todas.body.datos).toHaveLength(2);
+  });
+
+  it('revierte venta, detalles, secuencia, inventario y caja si falla una escritura', async () => {
+    const { venta } = await prepararVenta();
+    const http = request(app.getHttpServer());
+    const fallo = (code: string) =>
+      new Prisma.PrismaClientKnownRequestError('Fallo simulado', {
+        code,
+        clientVersion: '7',
+      });
+    fixture.db.movimientoAlmacen.createMany.mockImplementationOnce(async () => {
+      fixture.estado().movimientos.push({ id: 'incompleto' });
+      throw fallo('P2003');
+    });
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(venta)
+      .expect(409);
+    fixture.db.sesionCaja.updateMany.mockResolvedValueOnce({ count: 0 });
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(venta)
+      .expect(409);
+    expect(fixture.estado().ventas).toEqual([]);
+    expect(fixture.estado().detallesVenta).toEqual([]);
+    expect(fixture.estado().movimientos).toHaveLength(1);
+    expect(fixture.estado().cajas[0].totalVentas.toString()).toBe('0');
+    expect(fixture.estado().cajas[0].cantidadVentas).toBe(0);
+    expect(
+      fixture.estado().secuencias.some((row) => row.tipo === 'FACTURA'),
+    ).toBe(false);
+    fixture.db.movimientoAlmacen.createMany.mockImplementationOnce(async () => {
+      throw fallo('P2034');
+    });
+    const transaccion = vi.spyOn(fixture.db, '$transaction');
+    const creada = await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(venta)
+      .expect(201);
+    expect(creada.body.numeroFactura).toBe('F-0001');
+    expect(transaccion).toHaveBeenCalledTimes(2);
+    expect(transaccion).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+    });
+    expect(fixture.estado().ventas).toHaveLength(1);
+    expect(fixture.estado().movimientos).toHaveLength(2);
+    expect(fixture.estado().cajas[0].cantidadVentas).toBe(1);
+    transaccion.mockRestore();
+  });
+
+  it('relee el inventario tras un conflicto de transaccion y no vende stock ya consumido', async () => {
+    const { venta, empresa, articulo } = await prepararVenta();
+    const transaccion = vi
+      .spyOn(fixture.db, '$transaction')
+      .mockImplementationOnce(async () => {
+        // Representa una salida confirmada por otra operacion antes del reintento.
+        fixture
+          .estado()
+          .movimientos.push({
+            empresaId: empresa.id,
+            productoId: articulo.id,
+            tipo: 'AJUSTE',
+            cantidad: new Prisma.Decimal('-9'),
+          });
+        throw new Prisma.PrismaClientKnownRequestError('Conflicto simulado', {
+          code: 'P2034',
+          clientVersion: '7',
+        });
+      });
+    await request(app.getHttpServer())
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(venta)
+      .expect(409);
+    expect(transaccion).toHaveBeenCalledTimes(2);
+    expect(fixture.estado().ventas).toEqual([]);
+    expect(fixture.estado().cajas[0].cantidadVentas).toBe(0);
+    transaccion.mockRestore();
+  });
+
+  it('rechaza IVA invalido e importes que exceden la precision de venta o caja', async () => {
+    const { venta, empresa, articulo } = await prepararVenta();
+    const http = request(app.getHttpServer());
+    fixture.estado().empresas[0].porcentajeIva = new Prisma.Decimal(101);
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(venta)
+      .expect(400);
+    fixture.estado().empresas[0].porcentajeIva = new Prisma.Decimal(15);
+    fixture.estado().cajas[0].totalVentas = new Prisma.Decimal(
+      '999999999999.99',
+    );
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(venta)
+      .expect(400);
+    fixture.estado().cajas[0].totalVentas = new Prisma.Decimal(0);
+    fixture.estado().productos[0].precioBase = new Prisma.Decimal(
+      '9999999999.99',
+    );
+    fixture
+      .estado()
+      .movimientos.push({
+        empresaId: empresa.id,
+        productoId: articulo.id,
+        tipo: 'COMPRA',
+        cantidad: new Prisma.Decimal('200'),
+      });
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({
+        ...venta,
+        detalles: [{ productoId: articulo.id, cantidad: '101' }],
+      })
+      .expect(400);
+    expect(fixture.estado().ventas).toEqual([]);
+  });
 
   async function crearOrdenParaRecibir() {
     const compra = await prepararCompra();
@@ -544,14 +1859,12 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
       .set('x-usuario-prueba', 'usuario-1')
       .expect(200);
     expect(resultado.body.stockDisponible).toBe('11');
-    fixture
-      .estado()
-      .movimientos.push({
-        empresaId: empresa.id,
-        productoId: articulo.id,
-        tipo: 'AJUSTE',
-        cantidad: new Prisma.Decimal('-11.125'),
-      });
+    fixture.estado().movimientos.push({
+      empresaId: empresa.id,
+      productoId: articulo.id,
+      tipo: 'AJUSTE',
+      cantidad: new Prisma.Decimal('-11.125'),
+    });
     const negativo = await http
       .get(`/inventario/${articulo.id}`)
       .set('x-usuario-prueba', 'usuario-1')
@@ -568,28 +1881,26 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
       .set('x-usuario-prueba', 'usuario-1')
       .send({ ...producto, sku: 'SIN-MOVIMIENTOS' })
       .expect(201);
-    fixture
-      .estado()
-      .movimientos.push(
-        {
-          empresaId: empresa.id,
-          productoId: articulo.id,
-          tipo: 'COMPRA',
-          cantidad: new Prisma.Decimal('10'),
-        },
-        {
-          empresaId: otra.empresa.id,
-          productoId: otra.articulo.id,
-          tipo: 'COMPRA',
-          cantidad: new Prisma.Decimal('500'),
-        },
-        {
-          empresaId: otra.empresa.id,
-          productoId: articulo.id,
-          tipo: 'COMPRA',
-          cantidad: new Prisma.Decimal('900'),
-        },
-      );
+    fixture.estado().movimientos.push(
+      {
+        empresaId: empresa.id,
+        productoId: articulo.id,
+        tipo: 'COMPRA',
+        cantidad: new Prisma.Decimal('10'),
+      },
+      {
+        empresaId: otra.empresa.id,
+        productoId: otra.articulo.id,
+        tipo: 'COMPRA',
+        cantidad: new Prisma.Decimal('500'),
+      },
+      {
+        empresaId: otra.empresa.id,
+        productoId: articulo.id,
+        tipo: 'COMPRA',
+        cantidad: new Prisma.Decimal('900'),
+      },
+    );
     const propia = await http
       .get('/inventario')
       .set('x-usuario-prueba', 'usuario-1')
@@ -1877,18 +3188,6 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
       leer: ['ADMIN'],
       crear: ['ADMIN'],
       editar: ['ADMIN'],
-    },
-    {
-      modulo: 'ventas',
-      leer: ['ADMIN', 'CAJERO'],
-      crear: ['ADMIN', 'CAJERO'],
-      editar: ['ADMIN'],
-    },
-    {
-      modulo: 'caja',
-      leer: ['ADMIN', 'CAJERO'],
-      crear: ['ADMIN', 'CAJERO'],
-      editar: ['ADMIN', 'CAJERO'],
     },
     {
       modulo: 'creditos',
