@@ -8,10 +8,12 @@ import {
   Req,
   Query,
   ParseUUIDPipe,
+  HttpCode,
 } from '@nestjs/common';
 import { CajaService } from './caja.service.js';
 import { CreateCajaDto } from './dto/create-caja.dto.js';
 import { ListarCajasDto } from './dto/listar-cajas.dto.js';
+import { CerrarCajaDto } from './dto/cerrar-caja.dto.js';
 
 import { Roles } from '../roles/roles.decorator.js';
 import { RolesGuard } from '../roles/roles.guard.js';
@@ -65,6 +67,37 @@ export class CajaController {
       usuario.id,
       usuario.rol === 'ADMIN',
       id,
+    );
+  }
+
+  @Get(':id/arqueo')
+  arqueo(
+    @Req() request: SolicitudConUsuario,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+  ) {
+    const usuario = request.usuario!;
+    return this.cajaService.arqueo(
+      usuario.empresaId,
+      usuario.id,
+      usuario.rol === 'ADMIN',
+      id,
+    );
+  }
+
+  @Post(':id/cerrar')
+  @HttpCode(200)
+  cerrar(
+    @Req() request: SolicitudConUsuario,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+    @Body() dto: CerrarCajaDto,
+  ) {
+    const usuario = request.usuario!;
+    return this.cajaService.cerrar(
+      usuario.empresaId,
+      usuario.id,
+      usuario.rol === 'ADMIN',
+      id,
+      dto,
     );
   }
 }
