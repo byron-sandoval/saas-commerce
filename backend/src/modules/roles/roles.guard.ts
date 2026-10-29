@@ -13,7 +13,7 @@ import type { NombreRolInicial } from './roles.constants.js';
 import { ROLES_PERMITIDOS } from './roles.decorator.js';
 
 export type SolicitudConUsuario = Request & {
-  usuario?: { id: string; empresaId: string; rolId: string };
+  usuario?: { id: string; empresaId: string; rolId: string; rol: string };
 };
 
 @Injectable()
@@ -81,6 +81,7 @@ export class RolesGuard implements CanActivate {
       id: usuario.id,
       empresaId: usuario.empresaId,
       rolId: usuario.rolId,
+      rol: rol.nombre,
     };
     return true;
   }

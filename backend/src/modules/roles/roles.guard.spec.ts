@@ -59,6 +59,7 @@ describe('Permisos de catalogo', () => {
         id: 'usuario-1',
         empresaId: 'empresa-1',
         rolId: 'rol-1',
+        rol: nombre,
       });
     },
   );
