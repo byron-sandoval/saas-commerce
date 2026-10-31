@@ -14,6 +14,9 @@ import { VentasService } from './ventas.service.js';
 import { CreateVentaDto } from './dto/create-venta.dto.js';
 import { ListarVentasDto } from './dto/listar-ventas.dto.js';
 import { AnularVentaDto } from './dto/anular-venta.dto.js';
+import { CreateDevolucionDto } from './dto/create-devolucion.dto.js';
+import { ListarDevolucionesDto } from './dto/listar-devoluciones.dto.js';
+import { DevolucionesService } from './devoluciones.service.js';
 
 import { Roles } from '../roles/roles.decorator.js';
 import { RolesGuard } from '../roles/roles.guard.js';
@@ -23,7 +26,39 @@ import type { SolicitudConUsuario } from '../roles/roles.guard.js';
 @UseGuards(RolesGuard)
 @Roles('ADMIN', 'CAJERO')
 export class VentasController {
-  constructor(private readonly ventasService: VentasService) {}
+  constructor(
+    private readonly ventasService: VentasService,
+    private readonly devolucionesService: DevolucionesService,
+  ) {}
+
+  @Post(':id/devoluciones')
+  @Roles('ADMIN')
+  devolver(
+    @Req() request: SolicitudConUsuario,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+    @Body() dto: CreateDevolucionDto,
+  ) {
+    return this.devolucionesService.create(
+      request.usuario!.empresaId,
+      request.usuario!.id,
+      id,
+      dto,
+    );
+  }
+
+  @Get(':id/devoluciones')
+  @Roles('ADMIN')
+  listarDevoluciones(
+    @Req() request: SolicitudConUsuario,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+    @Query() consulta: ListarDevolucionesDto,
+  ) {
+    return this.devolucionesService.findAll(
+      request.usuario!.empresaId,
+      id,
+      consulta,
+    );
+  }
 
   @Post()
   create(@Req() request: SolicitudConUsuario, @Body() dto: CreateVentaDto) {

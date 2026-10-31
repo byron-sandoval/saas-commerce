@@ -12,6 +12,7 @@ import type { CreateVentaDto } from './dto/create-venta.dto.js';
 import type { ListarVentasDto } from './dto/listar-ventas.dto.js';
 import type { AnularVentaDto } from './dto/anular-venta.dto.js';
 import { CreditosService } from '../creditos/creditos.service.js';
+import { CajaService } from '../caja/caja.service.js';
 
 @Injectable()
 export class VentasService {
@@ -19,6 +20,7 @@ export class VentasService {
     private readonly prisma: PrismaService,
     private readonly inventario: InventarioService,
     private readonly creditos: CreditosService,
+    private readonly cajas: CajaService,
   ) {}
 
   create(
@@ -161,7 +163,12 @@ export class VentasService {
       this.dinero(caja.totalVentas.plus(total));
       this.dinero(caja[campoPago].plus(total));
       if (metodoPago === 'EFECTIVO') {
-        this.dinero(caja.efectivoInicial.plus(caja.totalEfectivo).plus(total));
+        const abonos = await this.cajas.resumenAbonos(empresaId, caja.id, tx);
+        this.cajas.calcularEsperado(
+          caja.efectivoInicial,
+          caja.totalEfectivo.plus(total),
+          abonos.totalAbonosEfectivo,
+        );
       }
       const secuencia = await tx.secuencia.upsert({
         where: { empresaId_tipo: { empresaId, tipo: 'FACTURA' } },
