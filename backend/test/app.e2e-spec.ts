@@ -41,6 +41,7 @@ function baseSimulada() {
     creditos: [],
     abonos: [],
     devoluciones: [],
+    detallesDevolucion: [],
   };
   let impedirVinculo = false;
   const error = (code: string) =>
@@ -115,14 +116,77 @@ function baseSimulada() {
       : {}),
   });
   const db = {
+    devolucion: {
+      create: vi.fn(async ({ data }: Row) => {
+        const { detalles, ...cabecera } = data;
+        if (!buscar('ventas', { empresaId: data.empresaId, id: data.ventaId }))
+          throw error('P2003');
+        const row = { id: randomUUID(), creadoEn: new Date(), ...cabecera };
+        const items = detalles.create.map((d: Row) => ({
+          id: randomUUID(),
+          devolucionId: row.id,
+          ...d,
+        }));
+        state.devoluciones.push(row);
+        state.detallesDevolucion.push(...items);
+        return { ...row, detalles: items };
+      }),
+      findMany: vi.fn(async ({ where, skip, take }: Row) => {
+        const rows = state.devoluciones
+          .filter((row) =>
+            Object.entries(limpiar(where)).every(
+              ([key, value]) => row[key] === value,
+            ),
+          )
+          .sort(
+            (a, b) =>
+              b.creadoEn.getTime() - a.creadoEn.getTime() ||
+              a.id.localeCompare(b.id),
+          )
+          .map((row) => ({
+            ...row,
+            detalles: state.detallesDevolucion.filter(
+              (d) => d.devolucionId === row.id,
+            ),
+            movimientos: state.movimientos.filter(
+              (m) => m.devolucionId === row.id,
+            ),
+          }));
+        return skip === undefined ? rows : rows.slice(skip, skip + take);
+      }),
+    },
     abono: {
+      groupBy: vi.fn(async ({ where }: Row) => {
+        const grupos = new Map<string, Prisma.Decimal>();
+        for (const abono of state.abonos.filter((row) =>
+          Object.entries(where).every(([key, value]) => row[key] === value),
+        ))
+          grupos.set(
+            abono.metodoPago,
+            (grupos.get(abono.metodoPago) ?? new Prisma.Decimal(0)).plus(
+              abono.monto,
+            ),
+          );
+        return [...grupos].map(([metodoPago, monto]) => ({
+          metodoPago,
+          _sum: { monto },
+        }));
+      }),
       create: vi.fn(async ({ data }: Row) => {
         if (
           !buscar('creditos', {
             empresaId: data.empresaId,
             id: data.creditoId,
           }) ||
-          !buscar('usuarios', { empresaId: data.empresaId, id: data.usuarioId })
+          !buscar('usuarios', {
+            empresaId: data.empresaId,
+            id: data.usuarioId,
+          }) ||
+          (data.sesionCajaId &&
+            !buscar('cajas', {
+              empresaId: data.empresaId,
+              id: data.sesionCajaId,
+            }))
         )
           throw error('P2003');
         const row = {
@@ -523,12 +587,19 @@ function baseSimulada() {
       }),
     },
     empresa: {
+      updateMany: vi.fn(async ({ where, data }: Row) => {
+        const row = buscar('empresas', where);
+        if (!row) return { count: 0 };
+        Object.assign(row, limpiar(data));
+        return { count: 1 };
+      }),
       findUnique: vi.fn(async ({ where }: Row) => buscar('empresas', where)),
       create: vi.fn(async ({ data }: Row) => {
         const row = {
           id: randomUUID(),
           estado: 'ACTIVA',
           porcentajeIva: new Prisma.Decimal(15),
+          devolucionesHabilitadas: false,
           ...limpiar(data),
         };
         state.empresas.push(row);
@@ -3133,7 +3204,7 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
     };
   }
 
-  it('cobra pagos parciales y completos con los campos actuales sin alterar caja ni inventario', async () => {
+  it('cobra pagos parciales y completos, incluye efectivo en el arqueo y conserva totales de ventas e inventario', async () => {
     const { rutaAbonos, credito, empresa, caja } = await prepararAbono();
     const http = request(app.getHttpServer());
     const cajasAntes = JSON.stringify(fixture.estado().cajas);
@@ -3159,7 +3230,7 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
       referenciaPago: 'REC-001',
     });
     expect(primero.body).not.toHaveProperty('claveOperacion');
-    expect(primero.body).not.toHaveProperty('sesionCajaId');
+    expect(primero.body.sesionCajaId).toBe(caja.id);
     const leido = await http
       .get(`/creditos/${credito.id}`)
       .set('x-usuario-prueba', 'usuario-1')
@@ -3203,7 +3274,8 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
       .get(`/caja/${caja.id}/arqueo`)
       .set('x-usuario-prueba', 'usuario-1')
       .expect(200);
-    expect(arqueo.body.efectivoEsperado).toBe('100');
+    expect(arqueo.body.efectivoEsperado).toBe('388.65');
+    expect(arqueo.body.totalAbonosEfectivo).toBe('288.65');
   });
 
   it.each(['ADMIN', 'CAJERO', 'BODEGUERO'])(
@@ -3303,13 +3375,11 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
       .send({ monto: '1' })
       .expect(404);
     await http.get(rutaAbonos).set('x-usuario-prueba', 'usuario-2').expect(404);
-    fixture
-      .estado()
-      .usuarios.push({
-        ...fixture.estado().usuarios[0],
-        id: 'usuario-3',
-        rolId: empresa.roles.find((rol: Row) => rol.nombre === 'CAJERO').id,
-      });
+    fixture.estado().usuarios.push({
+      ...fixture.estado().usuarios[0],
+      id: 'usuario-3',
+      rolId: empresa.roles.find((rol: Row) => rol.nombre === 'CAJERO').id,
+    });
     await http
       .post(rutaAbonos)
       .set('x-usuario-prueba', 'usuario-3')
@@ -3445,19 +3515,17 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
       .mockImplementationOnce(async () => {
         const credito = fixture.estado().creditos[0];
         credito.saldoPendiente = new Prisma.Decimal('88.65');
-        fixture
-          .estado()
-          .abonos.push({
-            id: randomUUID(),
-            empresaId: credito.empresaId,
-            creditoId: credito.id,
-            usuarioId: 'usuario-1',
-            fecha: new Date(),
-            monto: new Prisma.Decimal('200'),
-            saldoAnterior: new Prisma.Decimal('288.65'),
-            saldoNuevo: credito.saldoPendiente,
-            metodoPago: 'EFECTIVO',
-          });
+        fixture.estado().abonos.push({
+          id: randomUUID(),
+          empresaId: credito.empresaId,
+          creditoId: credito.id,
+          usuarioId: 'usuario-1',
+          fecha: new Date(),
+          monto: new Prisma.Decimal('200'),
+          saldoAnterior: new Prisma.Decimal('288.65'),
+          saldoNuevo: credito.saldoPendiente,
+          metodoPago: 'EFECTIVO',
+        });
         throw fallo;
       });
     await request(app.getHttpServer())
@@ -3472,6 +3540,650 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
     expect(fixture.estado().abonos).toHaveLength(1);
     tx.mockRestore();
   });
+
+  it('separa los abonos por caja y medio de pago, y conserva el cierre original del credito', async () => {
+    const { caja, rutaAbonos, empresa, credito } = await prepararAbono();
+    const http = request(app.getHttpServer());
+    await http
+      .post(`/caja/${caja.id}/cerrar`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoCierre: '100' })
+      .expect(200);
+    fixture.estado().usuarios.push({
+      ...fixture.estado().usuarios[0],
+      id: 'usuario-3',
+      rolId: empresa.roles.find((rol: Row) => rol.nombre === 'CAJERO').id,
+    });
+    const nueva = await http
+      .post('/caja')
+      .set('x-usuario-prueba', 'usuario-3')
+      .send({ efectivoInicial: '20' })
+      .expect(201);
+    for (const [metodoPago, monto] of [
+      ['EFECTIVO', '50'],
+      ['TARJETA', '30'],
+      ['TRANSFERENCIA', '10'],
+    ]) {
+      const cobro = await http
+        .post(rutaAbonos)
+        .set('x-usuario-prueba', 'usuario-3')
+        .send({ monto, metodoPago })
+        .expect(201);
+      expect(cobro.body.sesionCajaId).toBe(nueva.body.id);
+    }
+    // Los comprobantes previos a esta migracion no se atribuyen a una caja por fecha/usuario.
+    fixture.estado().abonos.push({
+      id: randomUUID(),
+      empresaId: empresa.id,
+      creditoId: credito.id,
+      usuarioId: 'usuario-1',
+      sesionCajaId: null,
+      metodoPago: 'EFECTIVO',
+      monto: new Prisma.Decimal(5),
+    });
+    const arqueo = await http
+      .get(`/caja/${nueva.body.id}/arqueo`)
+      .set('x-usuario-prueba', 'usuario-3')
+      .expect(200);
+    expect(arqueo.body).toMatchObject({
+      efectivoEsperado: '70',
+      totalAbonosEfectivo: '50',
+      totalAbonosTarjeta: '30',
+      totalAbonosTransfer: '10',
+      totalVentas: '0',
+      totalCredito: '0',
+      cantidadVentas: 0,
+    });
+    await http
+      .get(`/caja/${caja.id}/arqueo`)
+      .set('x-usuario-prueba', 'usuario-3')
+      .expect(404);
+    const cerrada = await http
+      .post(`/caja/${nueva.body.id}/cerrar`)
+      .set('x-usuario-prueba', 'usuario-3')
+      .send({ efectivoCierre: '70' })
+      .expect(200);
+    expect(cerrada.body).toMatchObject({
+      efectivoEsperado: '70',
+      diferencia: '0',
+      totalAbonosEfectivo: '50',
+    });
+    const original = await http
+      .get(`/caja/${caja.id}/arqueo`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(original.body).toMatchObject({
+      efectivoEsperado: '100',
+      diferencia: '0',
+      totalAbonosEfectivo: '0',
+    });
+    await http
+      .post(rutaAbonos)
+      .set('x-usuario-prueba', 'usuario-3')
+      .send({ monto: '1' })
+      .expect(409);
+    const historial = await http
+      .get(`/caja/${nueva.body.id}/arqueo`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(historial.body.efectivoEsperado).toBe('70');
+  });
+
+  it('revierte el cobro si la caja cambia y relee su estado tras un cierre concurrente', async () => {
+    const { rutaAbonos } = await prepararAbono();
+    const cobrar = () =>
+      request(app.getHttpServer())
+        .post(rutaAbonos)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ monto: '1' });
+    fixture.db.sesionCaja.updateMany.mockResolvedValueOnce({ count: 0 });
+    await cobrar().expect(409);
+    expect(fixture.estado().abonos).toEqual([]);
+    expect(fixture.estado().creditos[0].saldoPendiente.toString()).toBe(
+      '288.65',
+    );
+    const tx = vi
+      .spyOn(fixture.db, '$transaction')
+      .mockImplementationOnce(async () => {
+        fixture.estado().cajas[0].estado = 'CERRADA';
+        throw new Prisma.PrismaClientKnownRequestError('Conflicto', {
+          code: 'P2034',
+          clientVersion: '7',
+        });
+      });
+    await cobrar().expect(409);
+    expect(tx).toHaveBeenCalledTimes(2);
+    expect(fixture.estado().abonos).toEqual([]);
+    tx.mockRestore();
+  });
+
+  it('recalcula el arqueo de cierre tras un abono concurrente', async () => {
+    const { rutaAbonos, caja, credito, empresa } = await prepararAbono();
+    const tx = vi
+      .spyOn(fixture.db, '$transaction')
+      .mockImplementationOnce(async () => {
+        fixture.estado().creditos[0].saldoPendiente = new Prisma.Decimal(
+          '238.65',
+        );
+        fixture.estado().abonos.push({
+          id: randomUUID(),
+          empresaId: empresa.id,
+          creditoId: credito.id,
+          usuarioId: 'usuario-1',
+          sesionCajaId: caja.id,
+          monto: new Prisma.Decimal(50),
+          metodoPago: 'EFECTIVO',
+        });
+        throw new Prisma.PrismaClientKnownRequestError('Conflicto', {
+          code: 'P2034',
+          clientVersion: '7',
+        });
+      });
+    const cerrada = await request(app.getHttpServer())
+      .post(`/caja/${caja.id}/cerrar`)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ efectivoCierre: '150' })
+      .expect(200);
+    expect(cerrada.body).toMatchObject({
+      efectivoEsperado: '150',
+      diferencia: '0',
+      totalAbonosEfectivo: '50',
+    });
+    expect(tx).toHaveBeenCalledTimes(2);
+    tx.mockRestore();
+    await request(app.getHttpServer())
+      .post(rutaAbonos)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ monto: '1' })
+      .expect(409);
+  });
+
+  it('valida el limite de efectivo con abonos tanto al cobrar como al vender', async () => {
+    const { rutaAbonos, caja, credito, empresa, venta } = await prepararAbono();
+    fixture.estado().abonos.push({
+      id: randomUUID(),
+      empresaId: empresa.id,
+      creditoId: credito.id,
+      usuarioId: 'usuario-1',
+      sesionCajaId: caja.id,
+      monto: new Prisma.Decimal(200),
+      metodoPago: 'EFECTIVO',
+    });
+    fixture.estado().cajas[0].efectivoInicial = new Prisma.Decimal(
+      '999999999799.99',
+    );
+    const http = request(app.getHttpServer());
+    await http
+      .post(rutaAbonos)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ monto: '0.01' })
+      .expect(400);
+    await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(venta)
+      .expect(400);
+    expect(fixture.estado().creditos[0].saldoPendiente.toString()).toBe(
+      '288.65',
+    );
+    expect(fixture.estado().abonos).toHaveLength(1);
+    expect(fixture.estado().ventas).toHaveLength(1);
+  });
+
+  async function prepararDevolucion(
+    usuario = 'usuario-1',
+    metodoPago = 'EFECTIVO',
+  ) {
+    const contexto = await prepararVenta(usuario);
+    const http = request(app.getHttpServer());
+    const creada = await http
+      .post('/ventas')
+      .set('x-usuario-prueba', usuario)
+      .send({
+        ...contexto.venta,
+        metodoPago,
+        importeRecibido: metodoPago === 'EFECTIVO' ? '500' : undefined,
+      })
+      .expect(201);
+    await http
+      .patch('/empresas/actual/configuracion')
+      .set('x-usuario-prueba', usuario)
+      .send({ devolucionesHabilitadas: true })
+      .expect(200);
+    return {
+      ...contexto,
+      registrada: creada.body,
+      rutaDev: `/ventas/${creada.body.id}/devoluciones`,
+      dtoDev: {
+        motivo: 'Producto devuelto',
+        productosCambio: [{ productoId: contexto.articulo.id, cantidad: '1' }],
+        detalles: [
+          {
+            productoId: contexto.articulo.id,
+            cantidad: '1',
+            estadoProducto: 'BUENO',
+          },
+        ],
+      },
+    };
+  }
+
+  it('permite configurar devoluciones solo al ADMIN, desactivadas por defecto y aisladas por empresa', async () => {
+    const propia = await prepararVenta();
+    const ajena = await prepararVenta('usuario-2');
+    const http = request(app.getHttpServer());
+    const actual = await http
+      .get('/empresas/actual')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(actual.body.devolucionesHabilitadas).toBe(false);
+    await http
+      .patch('/empresas/actual/configuracion')
+      .send({ devolucionesHabilitadas: true })
+      .expect(401);
+    for (const body of [
+      {},
+      { devolucionesHabilitadas: null },
+      { devolucionesHabilitadas: 'true' },
+      { devolucionesHabilitadas: true, empresaId: ajena.empresa.id },
+      { devolucionesHabilitadas: true, porcentajeIva: '0' },
+    ])
+      await http
+        .patch('/empresas/actual/configuracion')
+        .set('x-usuario-prueba', 'usuario-1')
+        .send(body)
+        .expect(400);
+    await http
+      .patch('/empresas/actual/configuracion')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ devolucionesHabilitadas: true })
+      .expect(200);
+    expect(
+      fixture.estado().empresas.find((e) => e.id === ajena.empresa.id)!
+        .devolucionesHabilitadas,
+    ).toBe(false);
+    for (const nombre of ['CAJERO', 'BODEGUERO']) {
+      fixture.estado().usuarios[0].rolId = propia.empresa.roles.find(
+        (r: Row) => r.nombre === nombre,
+      ).id;
+      await http
+        .patch('/empresas/actual/configuracion')
+        .set('x-usuario-prueba', 'usuario-1')
+        .set('x-role', 'ADMIN')
+        .send({ devolucionesHabilitadas: false })
+        .expect(403);
+    }
+  });
+
+  it('registra cambios del mismo valor sin dinero, conserva ventas y ajusta entradas y salidas', async () => {
+    const { rutaDev, dtoDev, caja, registrada, articulo } =
+      await prepararDevolucion();
+    const http = request(app.getHttpServer());
+    const cajaAntes = JSON.stringify(fixture.estado().cajas);
+    const primera = await http
+      .post(rutaDev)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(dtoDev)
+      .expect(201);
+    expect(primera.body).toMatchObject({
+      tipo: 'CLIENTE',
+      estado: 'COMPLETADA',
+      usuarioId: 'usuario-1',
+      ventaId: registrada.id,
+    });
+    expect(primera.body).not.toHaveProperty('montoReembolso');
+    expect(primera.body.productosCambio[0]).toMatchObject({
+      productoId: articulo.id,
+      cantidad: '1',
+    });
+    expect(primera.body.detalles[0].reintegrarStock).toBe(true);
+    const stock = await http
+      .get(ruta + '/' + articulo.id)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(stock.body.stockDisponible).toBe('8');
+    const segunda = await http
+      .post(rutaDev)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({
+        ...dtoDev,
+        detalles: [{ ...dtoDev.detalles[0], estadoProducto: 'DANADO' }],
+      })
+      .expect(201);
+    expect(segunda.body.detalles[0].reintegrarStock).toBe(false);
+    expect(JSON.stringify(fixture.estado().cajas)).toBe(cajaAntes);
+    const arqueo = await http
+      .get('/caja/' + caja.id + '/arqueo')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(arqueo.body).toMatchObject({
+      totalVentas: '288.65',
+      totalEfectivo: '288.65',
+      cantidadVentas: 1,
+      efectivoEsperado: '388.65',
+    });
+    const final = await http
+      .get(ruta + '/' + articulo.id)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(final.body.stockDisponible).toBe('7');
+    await http
+      .post(rutaDev)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(dtoDev)
+      .expect(400);
+    await http
+      .post('/ventas/' + registrada.id + '/anular')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ motivo: 'No duplicar' })
+      .expect(409);
+    const historial = await http
+      .get(rutaDev)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(historial.body.datos).toHaveLength(2);
+    expect(historial.body.datos[0].movimientos.length).toBeGreaterThan(0);
+    expect(fixture.estado().devoluciones).toHaveLength(2);
+  });
+
+  it('acepta otro producto del mismo valor y rechaza mayor o menor valor y stock insuficiente', async () => {
+    const { rutaDev, dtoDev, articulo, empresa } = await prepararDevolucion();
+    const original = fixture
+      .estado()
+      .productos.find((p) => p.id === articulo.id)!;
+    const reemplazo: Row = { ...original, id: randomUUID(), sku: 'CAMBIO-001' };
+    fixture.estado().productos.push(reemplazo);
+    fixture.estado().movimientos.push({
+      id: randomUUID(),
+      empresaId: empresa.id,
+      productoId: reemplazo.id,
+      tipo: 'COMPRA',
+      cantidad: new Prisma.Decimal(2),
+    });
+    const datos = {
+      ...dtoDev,
+      productosCambio: [{ productoId: reemplazo.id, cantidad: '1' }],
+    };
+    const http = request(app.getHttpServer());
+    for (const precio of ['125.49', '125.51']) {
+      fixture
+        .estado()
+        .productos.find((p) => p.id === reemplazo.id)!.precioBase =
+        new Prisma.Decimal(precio);
+      await http
+        .post(rutaDev)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send(datos)
+        .expect(400);
+    }
+    fixture.estado().productos.find((p) => p.id === reemplazo.id)!.precioBase =
+      original.precioBase;
+    fixture.estado().movimientos[2].cantidad = new Prisma.Decimal(0);
+    await http
+      .post(rutaDev)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(datos)
+      .expect(409);
+    fixture.estado().movimientos[2].cantidad = new Prisma.Decimal(2);
+    await http
+      .post(rutaDev)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(datos)
+      .expect(201);
+    const salidas = fixture
+      .estado()
+      .movimientos.filter(
+        (m) => m.productoId === reemplazo.id && m.tipo === 'DEVOLUCION_CLIENTE',
+      );
+    expect(salidas[0].cantidad.toString()).toBe('-1');
+  });
+
+  it('desactivar bloquea cambios nuevos y conserva el historial', async () => {
+    const { rutaDev, dtoDev } = await prepararDevolucion();
+    const http = request(app.getHttpServer());
+    await http
+      .post(rutaDev)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(dtoDev)
+      .expect(201);
+    await http
+      .patch('/empresas/actual/configuracion')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ devolucionesHabilitadas: false })
+      .expect(200);
+    await http
+      .post(rutaDev)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(dtoDev)
+      .expect(403);
+    const historial = await http
+      .get(rutaDev + '?pagina=1&limite=1')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(historial.body.datos).toHaveLength(1);
+  });
+
+  it.each(['CAJERO', 'BODEGUERO'])(
+    'reserva cambios e historial al ADMIN y rechaza %s',
+    async (nombre) => {
+      const { rutaDev, dtoDev, empresa } = await prepararDevolucion();
+      fixture.estado().usuarios[0].rolId = empresa.roles.find(
+        (r: Row) => r.nombre === nombre,
+      ).id;
+      const http = request(app.getHttpServer());
+      await http.post(rutaDev).send(dtoDev).expect(401);
+      await http.get(rutaDev).expect(401);
+      await http
+        .post(rutaDev)
+        .set('x-usuario-prueba', 'usuario-1')
+        .set('x-role', 'ADMIN')
+        .send(dtoDev)
+        .expect(403);
+      await http.get(rutaDev).set('x-usuario-prueba', 'usuario-1').expect(403);
+    },
+  );
+
+  it.each(['EFECTIVO', 'TARJETA', 'TRANSFERENCIA'])(
+    'conserva los totales y arqueo de una venta por %s al cambiar productos',
+    async (metodoPago) => {
+      const { rutaDev, dtoDev } = await prepararDevolucion(
+        'usuario-1',
+        metodoPago,
+      );
+      const antes = JSON.stringify(fixture.estado().cajas);
+      await request(app.getHttpServer())
+        .post(rutaDev)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send(dtoDev)
+        .expect(201);
+      expect(JSON.stringify(fixture.estado().cajas)).toBe(antes);
+    },
+  );
+
+  it('valida productos de cambio, cantidades y campos del backend', async () => {
+    const { rutaDev, dtoDev } = await prepararDevolucion();
+    const http = request(app.getHttpServer());
+    const invalidos = [
+      { ...dtoDev, motivo: '' },
+      { ...dtoDev, detalles: [] },
+      { ...dtoDev, detalles: null },
+      { ...dtoDev, detalles: [dtoDev.detalles[0], dtoDev.detalles[0]] },
+      ...['0', '-1', '0.0001', '3', null, 1].map((cantidad) => ({
+        ...dtoDev,
+        detalles: [{ ...dtoDev.detalles[0], cantidad }],
+      })),
+      {
+        ...dtoDev,
+        detalles: [{ ...dtoDev.detalles[0], productoId: randomUUID() }],
+      },
+      {
+        ...dtoDev,
+        detalles: [{ ...dtoDev.detalles[0], estadoProducto: 'INVALIDO' }],
+      },
+      ...[
+        undefined,
+        null,
+        [],
+        [{ productoId: randomUUID(), cantidad: '1' }],
+        [dtoDev.productosCambio[0], dtoDev.productosCambio[0]],
+      ].map((productosCambio) => ({ ...dtoDev, productosCambio })),
+      ...[
+        'empresaId',
+        'usuarioId',
+        'montoReembolso',
+        'estado',
+        'sesionCajaId',
+      ].map((campo) => ({ ...dtoDev, [campo]: 'invalido' })),
+    ];
+    for (const body of invalidos)
+      await http
+        .post(rutaDev)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send(body)
+        .expect(400);
+    for (const query of ['pagina=0', 'limite=101', 'empresaId=ajena'])
+      await http
+        .get(rutaDev + '?' + query)
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(400);
+    expect(fixture.estado().devoluciones).toEqual([]);
+  });
+
+  it('separa empresas y rechaza ventas anuladas, a credito o con caja cerrada', async () => {
+    const propia = await prepararDevolucion();
+    const ajena = await prepararDevolucion('usuario-2');
+    const http = request(app.getHttpServer());
+    await http
+      .post(propia.rutaDev)
+      .set('x-usuario-prueba', 'usuario-2')
+      .send(propia.dtoDev)
+      .expect(404);
+    await http
+      .get(propia.rutaDev)
+      .set('x-usuario-prueba', 'usuario-2')
+      .expect(404);
+    await http
+      .post(propia.rutaDev)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({
+        ...propia.dtoDev,
+        productosCambio: [{ productoId: ajena.articulo.id, cantidad: '1' }],
+      })
+      .expect(400);
+    const venta = fixture.estado().ventas[0];
+    venta.estado = 'ANULADA';
+    await http
+      .post(propia.rutaDev)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(propia.dtoDev)
+      .expect(409);
+    venta.estado = 'COMPLETADA';
+    venta.tipoVenta = 'CREDITO';
+    await http
+      .post(propia.rutaDev)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(propia.dtoDev)
+      .expect(409);
+    venta.tipoVenta = 'CONTADO';
+    fixture.estado().cajas[0].estado = 'CERRADA';
+    await http
+      .post(propia.rutaDev)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(propia.dtoDev)
+      .expect(409);
+    expect(fixture.estado().devoluciones).toEqual([]);
+  });
+
+  it('revierte cambio y stock ante fallos y reintenta sin duplicar productos', async () => {
+    const { rutaDev, dtoDev } = await prepararDevolucion();
+    const fallo = (code: string) =>
+      new Prisma.PrismaClientKnownRequestError('Fallo', {
+        code,
+        clientVersion: '7',
+      });
+    const devolver = () =>
+      request(app.getHttpServer())
+        .post(rutaDev)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send(dtoDev);
+    fixture.db.movimientoAlmacen.createMany.mockRejectedValueOnce(
+      fallo('P2003'),
+    );
+    await devolver().expect(409);
+    fixture.db.sesionCaja.updateMany.mockResolvedValueOnce({ count: 0 });
+    await devolver().expect(409);
+    expect(fixture.estado().devoluciones).toEqual([]);
+    expect(fixture.estado().detallesDevolucion).toEqual([]);
+    expect(fixture.estado().movimientos).toHaveLength(2);
+    fixture.db.devolucion.create.mockRejectedValueOnce(fallo('P2034'));
+    const tx = vi.spyOn(fixture.db, '$transaction');
+    await devolver().expect(201);
+    expect(tx).toHaveBeenCalledTimes(2);
+    expect(fixture.estado().devoluciones).toHaveLength(1);
+    expect(fixture.estado().movimientos).toHaveLength(4);
+    tx.mockRestore();
+  });
+
+  it('relee cantidades tras otro cambio simultaneo y no duplica devoluciones', async () => {
+    const { rutaDev, dtoDev, empresa, registrada, articulo } =
+      await prepararDevolucion();
+    const tx = vi
+      .spyOn(fixture.db, '$transaction')
+      .mockImplementationOnce(async () => {
+        const id = randomUUID();
+        fixture.estado().devoluciones.push({
+          id,
+          empresaId: empresa.id,
+          ventaId: registrada.id,
+          estado: 'COMPLETADA',
+          creadoEn: new Date(),
+        });
+        fixture.estado().detallesDevolucion.push({
+          id: randomUUID(),
+          devolucionId: id,
+          productoId: articulo.id,
+          cantidad: new Prisma.Decimal(2),
+        });
+        throw new Prisma.PrismaClientKnownRequestError('Conflicto', {
+          code: 'P2034',
+          clientVersion: '7',
+        });
+      });
+    await request(app.getHttpServer())
+      .post(rutaDev)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(dtoDev)
+      .expect(400);
+    expect(tx).toHaveBeenCalledTimes(2);
+    expect(fixture.estado().devoluciones).toHaveLength(1);
+    tx.mockRestore();
+  });
+
+  it.each(['configuracion', 'caja'])(
+    'relee %s tras conflicto antes de aceptar un cambio',
+    async (caso) => {
+      const { rutaDev, dtoDev } = await prepararDevolucion();
+      const tx = vi
+        .spyOn(fixture.db, '$transaction')
+        .mockImplementationOnce(async () => {
+          if (caso === 'configuracion')
+            fixture.estado().empresas[0].devolucionesHabilitadas = false;
+          else fixture.estado().cajas[0].estado = 'CERRADA';
+          throw new Prisma.PrismaClientKnownRequestError('Conflicto', {
+            code: 'P2034',
+            clientVersion: '7',
+          });
+        });
+      await request(app.getHttpServer())
+        .post(rutaDev)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send(dtoDev)
+        .expect(caso === 'configuracion' ? 403 : 409);
+      expect(tx).toHaveBeenCalledTimes(2);
+      expect(fixture.estado().devoluciones).toEqual([]);
+      tx.mockRestore();
+    },
+  );
 
   async function crearOrdenParaRecibir() {
     const compra = await prepararCompra();
