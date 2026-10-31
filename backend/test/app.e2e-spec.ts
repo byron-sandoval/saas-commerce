@@ -3,13 +3,14 @@
 import 'reflect-metadata';
 import { randomUUID } from 'node:crypto';
 import { Test } from '@nestjs/testing';
-import { ValidationPipe } from '@nestjs/common';
+import { BadRequestException, ValidationPipe } from '@nestjs/common';
 import type { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { AppModule } from '../src/app.module.js';
 import { PrismaService } from '../src/prisma/prisma.service.js';
 import { AuthService } from '../src/modules/auth/auth.service.js';
 import { Prisma } from '../src/generated/prisma/client.js';
+import { hashPassword, verifyPassword } from 'better-auth/crypto';
 
 type Row = Record<string, any>;
 
@@ -24,6 +25,9 @@ function baseSimulada() {
   });
   let state: Record<string, Row[]> = {
     usuarios: [usuario('usuario-1'), usuario('usuario-2')],
+    accounts: [],
+    sessions: [],
+    suscripciones: [],
     empresas: [],
     roles: [],
     productos: [],
@@ -116,6 +120,11 @@ function baseSimulada() {
       : {}),
   });
   const db = {
+    suscripcion: {
+      findMany: vi.fn(async ({ where }: Row) =>
+        state.suscripciones.filter((s) => s.empresaId === where.empresaId),
+      ),
+    },
     devolucion: {
       create: vi.fn(async ({ data }: Row) => {
         const { detalles, ...cabecera } = data;
@@ -569,19 +578,77 @@ function baseSimulada() {
       }),
     },
     usuario: {
-      findUnique: vi.fn(async ({ where }: Row) => {
+      findUnique: vi.fn(async ({ where, select }: Row) => {
         const row = buscar('usuarios', where);
-        return row
-          ? {
-              ...row,
-              empresa: buscar('empresas', { id: row.empresaId }),
-              rol: buscar('roles', { id: row.rolId }),
-            }
-          : null;
+        if (!row) return null;
+        const completo: Row = {
+          ...row,
+          empresa: buscar('empresas', { id: row.empresaId }),
+          rol: buscar('roles', { id: row.rolId }),
+        };
+        if (!select) return completo;
+        return Object.fromEntries(
+          Object.entries(select).map(([key, value]) => [
+            key,
+            value === true || !completo[key]
+              ? completo[key]
+              : Object.fromEntries(
+                  Object.keys((value as Row).select).map((k) => [
+                    k,
+                    completo[key][k],
+                  ]),
+                ),
+          ]),
+        );
+      }),
+      findUniqueOrThrow: vi.fn(async (args: Row): Promise<Row> => {
+        const row = await db.usuario.findUnique(args);
+        if (!row) throw error('P2025');
+        return row;
+      }),
+      findMany: vi.fn(
+        async ({ where, skip, take, select }: Row): Promise<Row[]> => {
+          const rows = state.usuarios
+            .filter((row) =>
+              Object.entries(limpiar(where)).every(([k, v]) => row[k] === v),
+            )
+            .slice(skip, skip + take);
+          return Promise.all(
+            rows.map((row) =>
+              db.usuario.findUniqueOrThrow({ where: { id: row.id }, select }),
+            ),
+          );
+        },
+      ),
+      count: vi.fn(
+        async ({ where }: Row) =>
+          state.usuarios.filter((row) =>
+            Object.entries(where).every(([k, v]) => row[k] === v),
+          ).length,
+      ),
+      create: vi.fn(async ({ data }: Row) => {
+        if (
+          state.usuarios.some(
+            (u) => u.email === data.email || u.username === data.username,
+          )
+        )
+          throw error('P2002');
+        const row = { ...usuario(randomUUID()), creadoEn: new Date(), ...data };
+        state.usuarios.push(row);
+        return row;
       }),
       updateMany: vi.fn(async ({ where, data }: Row) => {
         const row = buscar('usuarios', where);
         if (!row || impedirVinculo) return { count: 0 };
+        if (
+          state.usuarios.some(
+            (u) =>
+              u.id !== row.id &&
+              ((data.email && u.email === data.email) ||
+                (data.username && u.username === data.username)),
+          )
+        )
+          throw error('P2002');
         Object.assign(row, limpiar(data));
         return { count: 1 };
       }),
@@ -607,6 +674,14 @@ function baseSimulada() {
       }),
     },
     rol: {
+      findUnique: vi.fn(
+        async ({ where }: Row) =>
+          state.roles.find(
+            (r) =>
+              r.empresaId === where.empresaId_nombre.empresaId &&
+              r.nombre === where.empresaId_nombre.nombre,
+          ) ?? null,
+      ),
       createMany: vi.fn(async ({ data }: Row) => {
         let count = 0;
         for (const rol of data) {
@@ -768,6 +843,63 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
       .useValue(fixture.db)
       .overrideProvider(AuthService)
       .useValue({
+        crearEmpleado: async (
+          tx: typeof fixture.db,
+          datos: Row,
+          password: string,
+        ) => {
+          const row = await tx.usuario.create({
+            data: {
+              ...datos,
+              activo: true,
+              debeCambiarPassword: true,
+              emailVerified: false,
+            },
+          });
+          fixture.estado().accounts.push({
+            id: randomUUID(),
+            userId: row.id,
+            providerId: 'credential',
+            accountId: row.id,
+            password: await hashPassword(password),
+          });
+          return row.id;
+        },
+        actualizarEmpleado: async (
+          tx: typeof fixture.db,
+          id: string,
+          datos: Row,
+        ) => {
+          const { name, ...resto } = datos;
+          return tx.usuario.updateMany({
+            where: { id },
+            data: { ...resto, ...(name === undefined ? {} : { nombre: name }) },
+          });
+        },
+        guardarPassword: async (
+          _tx: unknown,
+          id: string,
+          nueva: string,
+          actual?: string,
+        ) => {
+          const cuenta = fixture.estado().accounts.find((a) => a.userId === id);
+          if (!cuenta) throw new Error('Cuenta inexistente en doble.');
+          if (
+            (actual !== undefined &&
+              !(await verifyPassword({
+                hash: cuenta.password,
+                password: actual,
+              }))) ||
+            actual === nueva
+          )
+            throw new BadRequestException('Password invalida.');
+          cuenta.password = await hashPassword(nueva);
+        },
+        revocarSesiones: async (_tx: unknown, id: string) => {
+          fixture.estado().sessions = fixture
+            .estado()
+            .sessions.filter((s) => s.userId !== id);
+        },
         auth: {
           api: {
             // Esta cabecera solo existe en el doble de prueba, nunca en produccion.
@@ -5591,51 +5723,501 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
       .expect(201);
   });
 
-  it.each([
-    {
-      modulo: 'usuarios',
-      leer: ['ADMIN'],
-      crear: ['ADMIN'],
-      editar: ['ADMIN'],
-    },
-  ])(
-    'protege todas las rutas del modulo $modulo segun el rol',
-    async (permisos) => {
-      const empresa = await crearEmpresa();
+  const datosEmpleado = {
+    nombre: ' Cajero de prueba ',
+    email: ' NUEVO@example.com ',
+    username: ' NUEVO_CAJERO ',
+    rol: 'CAJERO',
+  };
+
+  async function crearEmpleadoPrueba() {
+    const empresa = await crearEmpresa();
+    const creado = await request(app.getHttpServer())
+      .post('/usuarios')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(datosEmpleado)
+      .expect(201);
+    return { empresa, empleado: creado.body };
+  }
+
+  it('crea empleado con credencial temporal, sin cambiar sesion del ADMIN y sin exponer secretos al consultar', async () => {
+    const { empresa, empleado } = await crearEmpleadoPrueba();
+    expect(empleado).toMatchObject({
+      nombre: 'Cajero de prueba',
+      email: 'nuevo@example.com',
+      username: 'nuevo_cajero',
+      empresaId: empresa.id,
+      activo: true,
+      debeCambiarPassword: true,
+      rol: { nombre: 'CAJERO' },
+    });
+    expect(empleado.passwordTemporal).toHaveLength(24);
+    expect(
+      new Date(empleado.passwordTemporalExpiraEn).getTime(),
+    ).toBeGreaterThan(Date.now());
+    const cuenta = fixture.estado().accounts[0];
+    expect(cuenta.password).not.toBe(empleado.passwordTemporal);
+    expect(
+      await verifyPassword({
+        hash: cuenta.password,
+        password: empleado.passwordTemporal,
+      }),
+    ).toBe(true);
+    expect(fixture.estado().sessions).toEqual([]);
+    expect(fixture.estado().usuarios[0].id).toBe('usuario-1');
+    const http = request(app.getHttpServer());
+    const lista = await http
+      .get('/usuarios?activo=true&limite=1')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(lista.body.datos).toHaveLength(1);
+    const leido = await http
+      .get('/usuarios/' + empleado.id)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(leido.body).not.toHaveProperty('passwordTemporal');
+    expect(leido.body).not.toHaveProperty('accounts');
+    expect(leido.body).not.toHaveProperty('sessions');
+    expect(leido.body).not.toHaveProperty('superAdmin');
+  });
+
+  it('exige cambio temporal antes de operar, verifica password y obliga a iniciar sesion de nuevo', async () => {
+    const { empleado } = await crearEmpleadoPrueba();
+    const http = request(app.getHttpServer());
+    const rutaPassword = '/usuarios/cambiar-password-temporal';
+    await http
+      .get('/catalogo/productos')
+      .set('x-usuario-prueba', empleado.id)
+      .expect(403);
+    await http
+      .post(rutaPassword)
+      .send({
+        passwordActual: empleado.passwordTemporal,
+        passwordNueva: 'NuevaSegura123!',
+      })
+      .expect(401);
+    await http
+      .post(rutaPassword)
+      .set('x-usuario-prueba', empleado.id)
+      .send({
+        passwordActual: 'Incorrecta123!',
+        passwordNueva: 'NuevaSegura123!',
+      })
+      .expect(400);
+    expect(
+      fixture.estado().usuarios.find((u) => u.id === empleado.id)!
+        .debeCambiarPassword,
+    ).toBe(true);
+    await http
+      .post(rutaPassword)
+      .set('x-usuario-prueba', empleado.id)
+      .send({
+        passwordActual: empleado.passwordTemporal,
+        passwordNueva: empleado.passwordTemporal,
+      })
+      .expect(400);
+    fixture
+      .estado()
+      .sessions.push({ userId: empleado.id, token: 'sesion-ficticia' });
+    await http
+      .post(rutaPassword)
+      .set('x-usuario-prueba', empleado.id)
+      .send({
+        passwordActual: empleado.passwordTemporal,
+        passwordNueva: 'NuevaSegura123!',
+      })
+      .expect(200);
+    expect(fixture.estado().sessions).toEqual([]);
+    const usuario = fixture
+      .estado()
+      .usuarios.find((u) => u.id === empleado.id)!;
+    expect(usuario.debeCambiarPassword).toBe(false);
+    expect(usuario.passwordTemporalExpiraEn).toBeNull();
+    expect(
+      await verifyPassword({
+        hash: fixture.estado().accounts[0].password,
+        password: 'NuevaSegura123!',
+      }),
+    ).toBe(true);
+    await http
+      .get('/catalogo/productos')
+      .set('x-usuario-prueba', empleado.id)
+      .expect(200);
+    await http
+      .post(rutaPassword)
+      .set('x-usuario-prueba', empleado.id)
+      .send({
+        passwordActual: 'NuevaSegura123!',
+        passwordNueva: 'OtraSegura123!',
+      })
+      .expect(403);
+  });
+
+  it('edita datos y rol, desactiva y reactiva empleados conservando identidad e historial', async () => {
+    const { empleado } = await crearEmpleadoPrueba();
+    const http = request(app.getHttpServer());
+    fixture
+      .estado()
+      .sessions.push({ userId: empleado.id, token: 'sesion-ficticia' });
+    const editado = await http
+      .patch('/usuarios/' + empleado.id)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({
+        nombre: 'Bodega',
+        rol: 'BODEGUERO',
+        email: 'BODEGA@example.com',
+        username: 'bodega',
+      })
+      .expect(200);
+    expect(editado.body).toMatchObject({
+      nombre: 'Bodega',
+      email: 'bodega@example.com',
+      rol: { nombre: 'BODEGUERO' },
+    });
+    expect(fixture.estado().sessions).toEqual([]);
+    const baja = await http
+      .delete('/usuarios/' + empleado.id)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(baja.body.activo).toBe(false);
+    expect(fixture.estado().accounts).toHaveLength(1);
+    await http
+      .delete('/usuarios/' + empleado.id)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(409);
+    const inactivos = await http
+      .get('/usuarios?activo=false')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(inactivos.body.datos.map((u: Row) => u.id)).toEqual([empleado.id]);
+    const alta = await http
+      .post('/usuarios/' + empleado.id + '/reactivar')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(alta.body.activo).toBe(true);
+    await http
+      .post('/usuarios/' + empleado.id + '/reactivar')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(409);
+  });
+
+  it('protege al ADMIN y bloquea desactivacion o cambio de rol con caja abierta', async () => {
+    const { empleado } = await crearEmpleadoPrueba();
+    const http = request(app.getHttpServer());
+    for (const [metodo, sufijo] of [
+      ['patch', ''],
+      ['delete', ''],
+      ['post', '/reactivar'],
+      ['post', '/password-temporal'],
+    ] as const) {
+      const peticion = http[metodo]('/usuarios/usuario-1' + sufijo).set(
+        'x-usuario-prueba',
+        'usuario-1',
+      );
+      if (metodo === 'patch') peticion.send({ nombre: 'No permitido' });
+      await peticion.expect(403);
+    }
+    fixture.estado().cajas.push({
+      id: randomUUID(),
+      empresaId: empleado.empresaId,
+      abiertoPorId: empleado.id,
+      estado: 'ABIERTA',
+    });
+    await http
+      .delete('/usuarios/' + empleado.id)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(409);
+    await http
+      .patch('/usuarios/' + empleado.id)
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ rol: 'BODEGUERO' })
+      .expect(409);
+    expect(
+      fixture.estado().usuarios.find((u) => u.id === empleado.id)!.activo,
+    ).toBe(true);
+  });
+
+  it.each(['CAJERO', 'BODEGUERO'])(
+    'reserva gestion de empleados al ADMIN, rechazando %s',
+    async (nombre) => {
+      const { empleado, empresa } = await crearEmpleadoPrueba();
+      fixture.estado().usuarios[0].rolId = empresa.roles.find(
+        (r: Row) => r.nombre === nombre,
+      ).id;
       const operaciones = [
-        { metodo: 'get', sufijo: '', roles: permisos.leer, exito: 200 },
-        { metodo: 'get', sufijo: '/1', roles: permisos.leer, exito: 200 },
-        { metodo: 'post', sufijo: '', roles: permisos.crear, exito: 201 },
-        { metodo: 'patch', sufijo: '/1', roles: permisos.editar, exito: 200 },
-        { metodo: 'delete', sufijo: '/1', roles: ['ADMIN'], exito: 200 },
+        ['get', ''],
+        ['get', '/' + empleado.id],
+        ['post', ''],
+        ['patch', '/' + empleado.id],
+        ['delete', '/' + empleado.id],
+        ['post', '/' + empleado.id + '/reactivar'],
+        ['post', '/' + empleado.id + '/password-temporal'],
       ] as const;
-
-      for (const operacion of operaciones) {
-        const path = `/${permisos.modulo}${operacion.sufijo}`;
-        const anonima = request(app.getHttpServer())[operacion.metodo](path);
-        if (operacion.metodo === 'post' || operacion.metodo === 'patch')
-          anonima.send({});
-        await anonima.expect(401);
-
-        for (const nombre of ['ADMIN', 'CAJERO', 'BODEGUERO']) {
-          fixture.estado().usuarios[0].rolId = fixture
-            .estado()
-            .roles.find(
-              (rol) => rol.empresaId === empresa.id && rol.nombre === nombre,
-            )!.id;
-          const peticion = request(app.getHttpServer())
-            [operacion.metodo](path)
-            .set('x-usuario-prueba', 'usuario-1');
-          if (operacion.metodo === 'post' || operacion.metodo === 'patch')
-            peticion.send({});
-          const esperado = operacion.roles.some((rol) => rol === nombre)
-            ? operacion.exito
-            : 403;
-          await peticion.expect(esperado);
-        }
+      for (const [metodo, sufijo] of operaciones) {
+        await request(app.getHttpServer())
+          [metodo]('/usuarios' + sufijo)
+          .send(datosEmpleado)
+          .expect(401);
+        await request(app.getHttpServer())
+          [metodo]('/usuarios' + sufijo)
+          .set('x-usuario-prueba', 'usuario-1')
+          .set('x-role', 'ADMIN')
+          .send(datosEmpleado)
+          .expect(403);
       }
     },
   );
+
+  it('impide asignaciones de empresa o ADMIN, valida entradas y rechaza identidades duplicadas', async () => {
+    const { empleado } = await crearEmpleadoPrueba();
+    const http = request(app.getHttpServer());
+    for (const extra of [
+      { rol: 'ADMIN' },
+      { rol: null },
+      { empresaId: 'ajena' },
+      { rolId: 'ajeno' },
+      { password: 'NoPermitida123!' },
+      { debeCambiarPassword: false },
+      { activo: false },
+      { nombre: '' },
+      { email: 'invalido' },
+      { username: 'ab' },
+      { username: 'No Espacios' },
+    ])
+      await http
+        .post('/usuarios')
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ ...datosEmpleado, ...extra })
+        .expect(400);
+    for (const body of [
+      {},
+      { nombre: null },
+      { email: null },
+      { username: null },
+      { rol: 'ADMIN' },
+      { activo: true },
+    ])
+      await http
+        .patch('/usuarios/' + empleado.id)
+        .set('x-usuario-prueba', 'usuario-1')
+        .send(body)
+        .expect(400);
+    await http
+      .post('/usuarios')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(datosEmpleado)
+      .expect(409);
+    expect(fixture.estado().accounts).toHaveLength(1);
+    for (const query of [
+      'pagina=0',
+      'limite=101',
+      'activo=otro',
+      'empresaId=ajena',
+    ])
+      await http
+        .get('/usuarios?' + query)
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(400);
+  });
+
+  it('separa empleados por empresa y no permite apropiarse de otra cuenta', async () => {
+    const { empleado } = await crearEmpleadoPrueba();
+    await crearEmpresa('usuario-2');
+    const http = request(app.getHttpServer());
+    await http
+      .get('/usuarios/' + empleado.id)
+      .set('x-usuario-prueba', 'usuario-2')
+      .expect(404);
+    await http
+      .patch('/usuarios/' + empleado.id)
+      .set('x-usuario-prueba', 'usuario-2')
+      .send({ nombre: 'Ajeno' })
+      .expect(404);
+    await http
+      .delete('/usuarios/' + empleado.id)
+      .set('x-usuario-prueba', 'usuario-2')
+      .expect(404);
+    await http
+      .post('/usuarios/' + empleado.id + '/reactivar')
+      .set('x-usuario-prueba', 'usuario-2')
+      .expect(404);
+    await http
+      .post('/usuarios/' + empleado.id + '/password-temporal')
+      .set('x-usuario-prueba', 'usuario-2')
+      .expect(404);
+    await http
+      .post('/usuarios')
+      .set('x-usuario-prueba', 'usuario-2')
+      .send(datosEmpleado)
+      .expect(409);
+    const listado = await http
+      .get('/usuarios')
+      .set('x-usuario-prueba', 'usuario-2')
+      .expect(200);
+    expect(listado.body.datos.map((u: Row) => u.id)).toEqual(['usuario-2']);
+  });
+
+  function agregarPlan(empresaId: string, limiteUsuarios: number | null) {
+    fixture.estado().suscripciones.push({
+      id: randomUUID(),
+      empresaId,
+      estado: 'ACTIVA',
+      fechaInicio: new Date(Date.now() - 10000),
+      fechaFin: new Date(Date.now() + 86400000),
+      plan: { activo: true, limiteUsuarios },
+    });
+  }
+
+  it('cuenta al ADMIN y a empleados activos para crear y reactivar segun el plan', async () => {
+    const { empresa, empleado } = await crearEmpleadoPrueba();
+    agregarPlan(empresa.id, 2);
+    const http = request(app.getHttpServer());
+    const otro = {
+      nombre: 'Otro',
+      email: 'otro@example.com',
+      username: 'otro',
+      rol: 'BODEGUERO',
+    };
+    await http
+      .post('/usuarios')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(otro)
+      .expect(409);
+    await http
+      .delete('/usuarios/' + empleado.id)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    await http
+      .post('/usuarios')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(otro)
+      .expect(201);
+    await http
+      .post('/usuarios/' + empleado.id + '/reactivar')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(409);
+    expect(
+      fixture
+        .estado()
+        .usuarios.filter((u) => u.empresaId === empresa.id && u.activo),
+    ).toHaveLength(2);
+  });
+
+  it.each(['vencida', 'suspendida', 'plan-inactivo', 'duplicada'])(
+    'rechaza altas si la suscripcion esta %s',
+    async (caso) => {
+      const empresa = await crearEmpresa();
+      agregarPlan(empresa.id, 3);
+      const suscripcion = fixture.estado().suscripciones[0];
+      if (caso === 'vencida') suscripcion.fechaFin = new Date('2000-01-01');
+      if (caso === 'suspendida') suscripcion.estado = 'SUSPENDIDA';
+      if (caso === 'plan-inactivo') suscripcion.plan.activo = false;
+      if (caso === 'duplicada') agregarPlan(empresa.id, 3);
+      await request(app.getHttpServer())
+        .post('/usuarios')
+        .set('x-usuario-prueba', 'usuario-1')
+        .send(datosEmpleado)
+        .expect(409);
+      expect(fixture.estado().accounts).toEqual([]);
+    },
+  );
+
+  it('rechaza una temporal vencida y permite al ADMIN generar otra revocando sesiones', async () => {
+    const { empleado } = await crearEmpleadoPrueba();
+    fixture
+      .estado()
+      .usuarios.find((u) => u.id === empleado.id)!.passwordTemporalExpiraEn =
+      new Date('2000-01-01');
+    const http = request(app.getHttpServer());
+    await http
+      .post('/usuarios/cambiar-password-temporal')
+      .set('x-usuario-prueba', empleado.id)
+      .send({
+        passwordActual: empleado.passwordTemporal,
+        passwordNueva: 'NuevaSegura123!',
+      })
+      .expect(403);
+    fixture.estado().sessions.push({ userId: empleado.id });
+    const nueva = await http
+      .post('/usuarios/' + empleado.id + '/password-temporal')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(nueva.headers['cache-control']).toBe('no-store');
+    expect(nueva.body.passwordTemporal).not.toBe(empleado.passwordTemporal);
+    expect(fixture.estado().sessions).toEqual([]);
+    expect(
+      await verifyPassword({
+        hash: fixture.estado().accounts[0].password,
+        password: nueva.body.passwordTemporal,
+      }),
+    ).toBe(true);
+  });
+
+  it('revierte toda el alta ante fallos y vuelve a comprobar cupos tras conflictos', async () => {
+    const empresa = await crearEmpresa();
+    agregarPlan(empresa.id, 2);
+    const fallo = new Prisma.PrismaClientKnownRequestError('Conflicto', {
+      code: 'P2034',
+      clientVersion: '7',
+    });
+    fixture.db.usuario.findUniqueOrThrow.mockRejectedValueOnce(fallo);
+    const tx = vi.spyOn(fixture.db, '$transaction');
+    await request(app.getHttpServer())
+      .post('/usuarios')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(datosEmpleado)
+      .expect(201);
+    expect(tx).toHaveBeenCalledTimes(2);
+    expect(fixture.estado().accounts).toHaveLength(1);
+    expect(
+      fixture.estado().usuarios.filter((u) => u.empresaId === empresa.id),
+    ).toHaveLength(2);
+    tx.mockRestore();
+    const otroTx = vi
+      .spyOn(fixture.db, '$transaction')
+      .mockImplementationOnce(async () => {
+        throw fallo;
+      });
+    await request(app.getHttpServer())
+      .post('/usuarios')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ ...datosEmpleado, email: 'otro@example.com', username: 'otro' })
+      .expect(409);
+    expect(otroTx).toHaveBeenCalledTimes(2);
+    expect(fixture.estado().accounts).toHaveLength(1);
+    otroTx.mockRestore();
+  });
+
+  it('relee el limite si otra alta consume el ultimo cupo durante un conflicto', async () => {
+    const empresa = await crearEmpresa();
+    agregarPlan(empresa.id, 2);
+    const tx = vi
+      .spyOn(fixture.db, '$transaction')
+      .mockImplementationOnce(async () => {
+        fixture
+          .estado()
+          .usuarios.push({
+            ...fixture.estado().usuarios[0],
+            id: 'alta-concurrente',
+            rolId: empresa.roles.find((r: Row) => r.nombre === 'CAJERO').id,
+          });
+        throw new Prisma.PrismaClientKnownRequestError('Conflicto', {
+          code: 'P2034',
+          clientVersion: '7',
+        });
+      });
+    await request(app.getHttpServer())
+      .post('/usuarios')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(datosEmpleado)
+      .expect(409);
+    expect(tx).toHaveBeenCalledTimes(2);
+    expect(fixture.estado().accounts).toEqual([]);
+    expect(
+      fixture.estado().usuarios.filter((u) => u.empresaId === empresa.id),
+    ).toHaveLength(2);
+    tx.mockRestore();
+  });
 
   it('rechaza importes invalidos, IDs ajenos y campos de control enviados por el cliente', async () => {
     await crearEmpresa();
