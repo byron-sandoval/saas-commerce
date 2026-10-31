@@ -11,10 +11,14 @@ import type { CreateCreditoDto } from './dto/create-credito.dto.js';
 import type { ListarCreditosDto } from './dto/listar-creditos.dto.js';
 import type { CreateAbonoDto } from './dto/create-abono.dto.js';
 import type { ListarAbonosDto } from './dto/listar-abonos.dto.js';
+import { CajaService } from '../caja/caja.service.js';
 
 @Injectable()
 export class CreditosService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly cajas: CajaService,
+  ) {}
 
   cobrarAbono(
     empresaId: string,
@@ -62,6 +66,29 @@ export class CreditosService {
           'Debes abrir tu propia caja antes de cobrar abonos.',
         );
 
+      // Escribir la fila serializa el cobro con el cierre, sin añadir contadores.
+      const abierta = await tx.sesionCaja.updateMany({
+        where: {
+          empresaId,
+          id: caja.id,
+          abiertoPorId: usuarioId,
+          estado: 'ABIERTA',
+        },
+        data: { estado: 'ABIERTA' },
+      });
+      if (abierta.count !== 1)
+        throw new ConflictException(
+          'La caja cambio durante el cobro. Vuelve a consultarla.',
+        );
+      if (dto.metodoPago === 'EFECTIVO') {
+        const abonos = await this.cajas.resumenAbonos(empresaId, caja.id, tx);
+        this.cajas.calcularEsperado(
+          caja.efectivoInicial,
+          caja.totalEfectivo,
+          abonos.totalAbonosEfectivo.plus(monto),
+        );
+      }
+
       const saldoAnterior = credito.saldoPendiente;
       const saldoNuevo = saldoAnterior.minus(monto);
       const vencido =
@@ -89,12 +116,12 @@ export class CreditosService {
           'El saldo cambio durante el cobro. Vuelve a consultarlo.',
         );
 
-      // La estructura actual no vincula Abono con SesionCaja; no altera sus totales.
       return tx.abono.create({
         data: {
           empresaId,
           creditoId,
           usuarioId,
+          sesionCajaId: caja.id,
           monto,
           saldoAnterior,
           saldoNuevo,

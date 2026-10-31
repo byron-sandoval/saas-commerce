@@ -4,9 +4,10 @@ import { CreditosController } from './creditos.controller.js';
 
 import { RolesModule } from '../roles/roles.module.js';
 import { PrismaModule } from '../../prisma/prisma.module.js';
+import { CajaModule } from '../caja/caja.module.js';
 
 @Module({
-  imports: [RolesModule, PrismaModule],
+  imports: [RolesModule, PrismaModule, CajaModule],
   controllers: [CreditosController],
   providers: [CreditosService],
   exports: [CreditosService],
