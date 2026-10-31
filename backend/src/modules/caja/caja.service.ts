@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -16,6 +17,22 @@ export class CajaService {
 
   create(empresaId: string, usuarioId: string, dto: CreateCajaDto) {
     return this.transaccion(async (tx) => {
+      // Coordina una apertura concurrente con baja o cambio de rol del empleado.
+      const usuario = await tx.usuario.findUnique({
+        where: { empresaId_id: { empresaId, id: usuarioId } },
+        include: { empresa: true, rol: true },
+      });
+      if (
+        !usuario?.activo ||
+        usuario.debeCambiarPassword ||
+        usuario.empresa?.estado !== 'ACTIVA' ||
+        !usuario.rol?.activo ||
+        usuario.rol.empresaId !== empresaId ||
+        !['ADMIN', 'CAJERO'].includes(usuario.rol.nombre)
+      )
+        throw new ForbiddenException(
+          'El usuario no esta habilitado para abrir caja.',
+        );
       const abierta = await tx.sesionCaja.findFirst({
         where: { empresaId, abiertoPorId: usuarioId, estado: 'ABIERTA' },
       });
