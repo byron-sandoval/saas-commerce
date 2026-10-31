@@ -9,5 +9,6 @@ import { PrismaModule } from '../../prisma/prisma.module.js';
   imports: [RolesModule, PrismaModule],
   controllers: [CajaController],
   providers: [CajaService],
+  exports: [CajaService],
 })
 export class CajaModule {}

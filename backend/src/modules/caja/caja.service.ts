@@ -48,7 +48,16 @@ export class CajaService {
       skip: (pagina - 1) * limite,
       take: limite,
     });
-    return { datos, pagina, limite };
+    return {
+      datos: await Promise.all(
+        datos.map(async (caja) => ({
+          ...caja,
+          ...(await this.resumenAbonos(empresaId, caja.id)),
+        })),
+      ),
+      pagina,
+      limite,
+    };
   }
 
   async findActual(empresaId: string, usuarioId: string) {
@@ -56,7 +65,7 @@ export class CajaService {
       where: { empresaId, abiertoPorId: usuarioId, estado: 'ABIERTA' },
     });
     if (!caja) throw new NotFoundException('No tienes una caja abierta.');
-    return caja;
+    return { ...caja, ...(await this.resumenAbonos(empresaId, caja.id)) };
   }
 
   async findOne(
@@ -64,15 +73,16 @@ export class CajaService {
     usuarioId: string,
     esAdmin: boolean,
     id: string,
+    db: Prisma.TransactionClient = this.prisma,
   ) {
-    const caja = await this.prisma.sesionCaja.findUnique({
+    const caja = await db.sesionCaja.findUnique({
       where: {
         empresaId_id: { empresaId, id },
         abiertoPorId: esAdmin ? undefined : usuarioId,
       },
     });
     if (!caja) throw new NotFoundException('Caja no encontrada.');
-    return caja;
+    return { ...caja, ...(await this.resumenAbonos(empresaId, caja.id, db)) };
   }
 
   async arqueo(
@@ -81,14 +91,20 @@ export class CajaService {
     esAdmin: boolean,
     id: string,
   ) {
-    const caja = await this.findOne(empresaId, usuarioId, esAdmin, id);
-    return {
-      ...caja,
-      efectivoEsperado:
-        caja.estado === 'ABIERTA'
-          ? this.calcularEsperado(caja.efectivoInicial, caja.totalEfectivo)
-          : caja.efectivoEsperado,
-    };
+    return this.transaccion(async (tx) => {
+      const caja = await this.findOne(empresaId, usuarioId, esAdmin, id, tx);
+      return {
+        ...caja,
+        efectivoEsperado:
+          caja.estado === 'ABIERTA'
+            ? this.calcularEsperado(
+                caja.efectivoInicial,
+                caja.totalEfectivo,
+                caja.totalAbonosEfectivo,
+              )
+            : caja.efectivoEsperado,
+      };
+    });
   }
 
   cerrar(
@@ -108,9 +124,11 @@ export class CajaService {
       if (!caja) throw new NotFoundException('Caja no encontrada.');
       if (caja.estado !== 'ABIERTA')
         throw new ConflictException('La caja ya esta cerrada.');
+      const abonos = await this.resumenAbonos(empresaId, id, tx);
       const efectivoEsperado = this.calcularEsperado(
         caja.efectivoInicial,
         caja.totalEfectivo,
+        abonos.totalAbonosEfectivo,
       );
       const efectivoCierre = new Prisma.Decimal(dto.efectivoCierre);
       const diferencia = efectivoCierre.minus(efectivoEsperado);
@@ -142,14 +160,40 @@ export class CajaService {
         throw new ConflictException(
           'La caja cambio durante el cierre. Vuelve a consultarla.',
         );
-      return tx.sesionCaja.findUniqueOrThrow({
+      const cerrada = await tx.sesionCaja.findUniqueOrThrow({
         where: { empresaId_id: { empresaId, id } },
       });
+      return { ...cerrada, ...abonos };
     });
   }
 
-  private calcularEsperado(inicial: Prisma.Decimal, cobrado: Prisma.Decimal) {
-    const esperado = inicial.plus(cobrado);
+  // Totales calculados desde los comprobantes; no son columnas de SesionCaja.
+  async resumenAbonos(
+    empresaId: string,
+    sesionCajaId: string,
+    db: Prisma.TransactionClient = this.prisma,
+  ) {
+    const grupos = await db.abono.groupBy({
+      by: ['metodoPago'],
+      where: { empresaId, sesionCajaId },
+      _sum: { monto: true },
+    });
+    const total = (metodo: string) =>
+      grupos.find((grupo) => grupo.metodoPago === metodo)?._sum.monto ??
+      new Prisma.Decimal(0);
+    return {
+      totalAbonosEfectivo: total('EFECTIVO'),
+      totalAbonosTarjeta: total('TARJETA'),
+      totalAbonosTransfer: total('TRANSFERENCIA'),
+    };
+  }
+
+  calcularEsperado(
+    inicial: Prisma.Decimal,
+    cobrado: Prisma.Decimal,
+    abonos: Prisma.Decimal,
+  ) {
+    const esperado = inicial.plus(cobrado).plus(abonos);
     if (
       !esperado.isFinite() ||
       esperado.isNegative() ||
