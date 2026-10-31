@@ -2,8 +2,13 @@ import { prismaAdapter } from '@better-auth/prisma-adapter';
 import type { BetterAuthOptions } from 'better-auth';
 import { username } from 'better-auth/plugins/username';
 import type { PrismaService } from '../../prisma/prisma.service.js';
+import type { Prisma } from '../../generated/prisma/client.js';
+import { APIError } from 'better-auth/api';
 
-export function createAuthOptions(prisma: PrismaService): BetterAuthOptions {
+export function createAuthOptions(
+  prisma: PrismaService | Prisma.TransactionClient,
+  transaction = true,
+): BetterAuthOptions {
   const secret = process.env.BETTER_AUTH_SECRET;
   const baseURL = process.env.BETTER_AUTH_URL;
 
@@ -34,9 +39,42 @@ export function createAuthOptions(prisma: PrismaService): BetterAuthOptions {
     trustedOrigins: [url.origin],
     database: prismaAdapter(prisma, {
       provider: 'postgresql',
-      transaction: true,
+      transaction,
     }),
     emailAndPassword: { enabled: true },
+    databaseHooks: {
+      session: {
+        create: {
+          before: async (session, context) => {
+            // El registro crea usuario y sesion en una misma transaccion de Better Auth.
+            // El adapter respeta esa transaccion; consultar el Prisma raiz no veria el alta.
+            const usuario = (
+              context
+                ? await context.context.internalAdapter.findUserById(
+                    session.userId,
+                  )
+                : await prisma.usuario.findUnique({
+                    where: { id: session.userId },
+                  })
+            ) as {
+              activo?: boolean;
+              debeCambiarPassword?: boolean;
+              passwordTemporalExpiraEn?: Date | null;
+            } | null;
+            if (
+              !usuario?.activo ||
+              (usuario.debeCambiarPassword &&
+                (!usuario.passwordTemporalExpiraEn ||
+                  usuario.passwordTemporalExpiraEn.getTime() <= Date.now()))
+            )
+              throw new APIError('FORBIDDEN', {
+                message:
+                  'La cuenta esta inactiva o su password temporal vencio.',
+              });
+          },
+        },
+      },
+    },
     user: {
       // Prisma expone el modelo Usuario mediante prisma.usuario.
       modelName: 'usuario',

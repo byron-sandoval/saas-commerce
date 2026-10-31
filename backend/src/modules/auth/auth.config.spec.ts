@@ -21,12 +21,64 @@ describe('Integracion de Better Auth', () => {
   afterEach(() => vi.unstubAllEnvs());
 
   function createPrismaMock() {
-    const delegate = () => ({
-      findFirst: vi.fn().mockResolvedValue(null),
-      create: vi.fn(
-        async ({ data }: { data: Record<string, unknown> }) => data,
-      ),
-    });
+    type Row = Record<string, any>;
+    const matches = (row: Row, where: Row = {}): boolean =>
+      Object.entries(where).every(([key, value]) =>
+        key === 'AND'
+          ? (value as Row[]).every((v) => matches(row, v))
+          : key === 'OR'
+            ? (value as Row[]).some((v) => matches(row, v))
+            : value && typeof value === 'object' && 'equals' in value
+              ? value.mode === 'insensitive'
+                ? String(row[key]).toLowerCase() ===
+                  String(value.equals).toLowerCase()
+                : row[key] === value.equals
+              : row[key] === value,
+      );
+    const delegate = () => {
+      const rows: Row[] = [];
+      return {
+        rows,
+        findFirst: vi.fn(async ({ where, select }: Row = {}) => {
+          const row = rows.find((r) => matches(r, where));
+          if (!row) return null;
+          return select?.accounts
+            ? {
+                ...row,
+                accounts: database.account.rows.filter(
+                  (a) => a.userId === row.id,
+                ),
+              }
+            : row;
+        }),
+        findUnique: vi.fn(
+          async ({ where }: Row) =>
+            rows.find((row) => matches(row, where)) ?? null,
+        ),
+        findMany: vi.fn(async ({ where }: Row = {}) =>
+          rows.filter((row) => matches(row, where)),
+        ),
+        create: vi.fn(async ({ data }: { data: Row }) => {
+          rows.push(data);
+          return data;
+        }),
+        update: vi.fn(async ({ where, data }: Row) => {
+          const row = rows.find((r) => matches(r, where));
+          if (!row) throw new Error('Registro inexistente en doble de prueba.');
+          Object.assign(row, data);
+          return row;
+        }),
+        deleteMany: vi.fn(async ({ where }: Row) => {
+          let count = 0;
+          for (let i = rows.length - 1; i >= 0; i--)
+            if (matches(rows[i], where)) {
+              rows.splice(i, 1);
+              count++;
+            }
+          return { count };
+        }),
+      };
+    };
     const database = {
       usuario: delegate(),
       account: delegate(),
@@ -58,7 +110,9 @@ describe('Integracion de Better Auth', () => {
       rolId: 'administrador',
       passwordTemporalExpiraEn: new Date(),
     })) {
-      expect(() => parseUserInput(options, { [field]: value }, 'create')).toThrow();
+      expect(() =>
+        parseUserInput(options, { [field]: value }, 'create'),
+      ).toThrow();
     }
     expect(
       parseUserInput(
@@ -127,4 +181,109 @@ describe('Integracion de Better Auth', () => {
       await app.close();
     }
   });
+
+  it('crea credenciales de empleado mediante Better Auth sin crear una sesion y permite autenticar su hash', async () => {
+    const database = createPrismaMock();
+    const service = new AuthService(database as unknown as PrismaService);
+    const tx = database as unknown as Parameters<
+      AuthService['crearEmpleado']
+    >[0];
+    const temporal = 'TemporalDePrueba123!';
+    const id = await service.crearEmpleado(
+      tx,
+      {
+        nombre: 'Cajero',
+        email: 'cajero@example.com',
+        username: 'cajero',
+        empresaId: 'empresa-1',
+        rolId: 'rol-1',
+        passwordTemporalExpiraEn: new Date(Date.now() + 86400000),
+      },
+      temporal,
+    );
+    expect(database.usuario.rows[0]).toMatchObject({
+      id,
+      nombre: 'Cajero',
+      empresaId: 'empresa-1',
+      rolId: 'rol-1',
+      debeCambiarPassword: true,
+    });
+    expect(database.session.rows).toHaveLength(0);
+    expect(database.account.rows[0]).toMatchObject({
+      providerId: 'credential',
+      accountId: id,
+      userId: id,
+    });
+    expect(database.account.rows[0].password).not.toBe(temporal);
+    const response = await service.auth.handler(
+      new Request('http://localhost:3000/api/auth/sign-in/email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: 'cajero@example.com',
+          password: temporal,
+        }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(database.session.rows).toHaveLength(1);
+    await service.guardarPassword(tx, id, 'NuevaPasswordPrueba123!', temporal);
+    await service.actualizarEmpleado(tx, id, {
+      name: 'Nombre actualizado',
+      email: 'actualizado@example.com',
+    });
+    expect(database.usuario.rows[0]).toMatchObject({
+      nombre: 'Nombre actualizado',
+      email: 'actualizado@example.com',
+    });
+    await service.revocarSesiones(tx, id);
+    expect(database.session.rows).toHaveLength(0);
+    await expect(
+      service.guardarPassword(tx, id, 'OtraPasswordPrueba123!', temporal),
+    ).rejects.toThrow('actual');
+  });
+
+  it.each(['inactivo', 'vencido', 'sin-vencimiento'])(
+    'no inicia sesion de empleado %s',
+    async (caso) => {
+      const database = createPrismaMock();
+      const service = new AuthService(database as unknown as PrismaService);
+      const tx = database as unknown as Parameters<
+        AuthService['crearEmpleado']
+      >[0];
+      await service.crearEmpleado(
+        tx,
+        {
+          nombre: 'Cajero',
+          email: 'cajero@example.com',
+          username: 'cajero',
+          empresaId: 'e',
+          rolId: 'r',
+          passwordTemporalExpiraEn: new Date(Date.now() + 86400000),
+        },
+        'TemporalDePrueba123!',
+      );
+      Object.assign(
+        database.usuario.rows[0],
+        caso === 'inactivo'
+          ? { activo: false }
+          : {
+              passwordTemporalExpiraEn:
+                caso === 'vencido' ? new Date('2000-01-01') : null,
+            },
+      );
+      const response = await service.auth.handler(
+        new Request('http://localhost:3000/api/auth/sign-in/email', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: 'cajero@example.com',
+            password: 'TemporalDePrueba123!',
+          }),
+        }),
+      );
+      expect(response.status).toBe(403);
+      expect(database.session.rows).toHaveLength(0);
+    },
+  );
 });
