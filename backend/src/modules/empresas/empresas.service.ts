@@ -7,6 +7,7 @@ import {
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { RolesService } from '../roles/roles.service.js';
 import type { CreateEmpresaDto } from './dto/create-empresa.dto.js';
+import type { ConfiguracionEmpresaDto } from './dto/configuracion-empresa.dto.js';
 
 @Injectable()
 export class EmpresasService {
@@ -84,5 +85,15 @@ export class EmpresasService {
     });
     if (!empresa) throw new NotFoundException('Empresa no encontrada.');
     return empresa;
+  }
+
+  async configurar(empresaId: string, dto: ConfiguracionEmpresaDto) {
+    const resultado = await this.prisma.empresa.updateMany({
+      where: { id: empresaId },
+      data: { devolucionesHabilitadas: dto.devolucionesHabilitadas },
+    });
+    if (resultado.count !== 1)
+      throw new NotFoundException('Empresa no encontrada.');
+    return this.findActual(empresaId);
   }
 }
