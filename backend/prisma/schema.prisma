@@ -224,19 +224,20 @@ model Plan {
 }
 
 model Empresa {
-  id            String        @id @default(uuid())
-  nombre        String        @db.VarChar(100)
-  ruc           String?       @db.VarChar(20)
-  regimenFiscal String?       @db.VarChar(80)
-  direccion     String        @db.VarChar(255)
-  telefono      String?       @db.VarChar(20)
-  correo        String?       @db.VarChar(100)
-  logoUrl       String?
-  eslogan       String?       @db.VarChar(150)
-  porcentajeIva Decimal       @default(15) @db.Decimal(5, 2)
-  estado        EstadoEmpresa @default(ACTIVA)
-  creadoEn      DateTime      @default(now())
-  actualizadoEn DateTime      @updatedAt
+  id                      String        @id @default(uuid())
+  nombre                  String        @db.VarChar(100)
+  ruc                     String?       @db.VarChar(20)
+  regimenFiscal           String?       @db.VarChar(80)
+  direccion               String        @db.VarChar(255)
+  telefono                String?       @db.VarChar(20)
+  correo                  String?       @db.VarChar(100)
+  logoUrl                 String?
+  eslogan                 String?       @db.VarChar(150)
+  porcentajeIva           Decimal       @default(15) @db.Decimal(5, 2)
+  devolucionesHabilitadas Boolean       @default(false)
+  estado                  EstadoEmpresa @default(ACTIVA)
+  creadoEn                DateTime      @default(now())
+  actualizadoEn           DateTime      @updatedAt
 
   usuarios            Usuario[]
   roles               Rol[]
@@ -484,6 +485,7 @@ model SesionCaja {
   abiertoPor Usuario  @relation("CajaAbiertaPor", fields: [empresaId, abiertoPorId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
   cerradoPor Usuario? @relation("CajaCerradaPor", fields: [empresaId, cerradoPorId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
   ventas     Venta[]
+  abonos     Abono[]
 
   @@unique([empresaId, id])
   @@index([empresaId, estado])
@@ -699,6 +701,7 @@ model Abono {
   empresaId      String
   creditoId      String
   usuarioId      String
+  sesionCajaId   String?
   fecha          DateTime   @default(now())
   monto          Decimal    @db.Decimal(14, 2)
   saldoAnterior  Decimal    @db.Decimal(14, 2)
@@ -707,11 +710,13 @@ model Abono {
   referenciaPago String?    @db.VarChar(100)
   descripcion    String?    @db.VarChar(400)
 
-  empresa Empresa @relation(fields: [empresaId], references: [id])
-  credito Credito @relation(fields: [empresaId, creditoId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
-  usuario Usuario @relation(fields: [empresaId, usuarioId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  empresa    Empresa     @relation(fields: [empresaId], references: [id])
+  credito    Credito     @relation(fields: [empresaId, creditoId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  usuario    Usuario     @relation(fields: [empresaId, usuarioId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
+  sesionCaja SesionCaja? @relation(fields: [empresaId, sesionCajaId], references: [empresaId, id], onDelete: Restrict, onUpdate: NoAction)
 
   @@unique([empresaId, id])
   @@index([empresaId, fecha])
   @@index([creditoId])
+  @@index([empresaId, sesionCajaId, metodoPago])
 }
