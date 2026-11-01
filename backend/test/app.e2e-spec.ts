@@ -654,6 +654,12 @@ function baseSimulada() {
       }),
     },
     empresa: {
+      update: vi.fn(async ({ where, data }: Row) => {
+        const row = buscar('empresas', where);
+        if (!row) throw error('P2025');
+        Object.assign(row, limpiar(data));
+        return row;
+      }),
       updateMany: vi.fn(async ({ where, data }: Row) => {
         const row = buscar('empresas', where);
         if (!row) return { count: 0 };
@@ -3862,6 +3868,217 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
     expect(fixture.estado().ventas).toHaveLength(1);
   });
 
+  it('edita datos de empresa parcialmente y permite limpiar los contactos opcionales', async () => {
+    const empresa = await crearEmpresa();
+    const http = request(app.getHttpServer());
+    const editada = await http
+      .patch('/empresas/actual/configuracion')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({
+        nombre: ' Ferreteria Nueva ',
+        direccion: ' Leon ',
+        ruc: ' RUC-001 ',
+        telefono: ' 2222-3333 ',
+        correo: ' VENTAS@EXAMPLE.COM ',
+        porcentajeIva: '12.50',
+      })
+      .expect(200);
+    expect(editada.body).toMatchObject({
+      id: empresa.id,
+      nombre: 'Ferreteria Nueva',
+      direccion: 'Leon',
+      ruc: 'RUC-001',
+      telefono: '2222-3333',
+      correo: 'ventas@example.com',
+      porcentajeIva: '12.5',
+      devolucionesHabilitadas: false,
+      estado: 'ACTIVA',
+    });
+    const parcial = await http
+      .patch('/empresas/actual/configuracion')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ nombre: 'Solo cambia nombre' })
+      .expect(200);
+    expect(parcial.body).toMatchObject({
+      nombre: 'Solo cambia nombre',
+      direccion: 'Leon',
+      porcentajeIva: '12.5',
+      correo: 'ventas@example.com',
+    });
+    const limpia = await http
+      .patch('/empresas/actual/configuracion')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ correo: null, telefono: null, ruc: null })
+      .expect(200);
+    expect(limpia.body).toMatchObject({
+      correo: null,
+      telefono: null,
+      ruc: null,
+      nombre: 'Solo cambia nombre',
+    });
+    const actual = await http
+      .get('/empresas/actual')
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(actual.body).toMatchObject({
+      nombre: 'Solo cambia nombre',
+      direccion: 'Leon',
+      porcentajeIva: '12.5',
+    });
+  });
+
+  it.each(['CAJERO', 'BODEGUERO'])(
+    'permite consultar pero no editar datos de empresa como %s',
+    async (nombre) => {
+      const empresa = await crearEmpresa();
+      fixture.estado().usuarios[0].rolId = empresa.roles.find(
+        (r: Row) => r.nombre === nombre,
+      ).id;
+      const http = request(app.getHttpServer());
+      await http
+        .patch('/empresas/actual/configuracion')
+        .send({ nombre: 'No autorizado' })
+        .expect(401);
+      await http
+        .patch('/empresas/actual/configuracion')
+        .set('x-usuario-prueba', 'usuario-1')
+        .set('x-role', 'ADMIN')
+        .send({ nombre: 'No autorizado', porcentajeIva: '0' })
+        .expect(403);
+      const actual = await http
+        .get('/empresas/actual')
+        .set('x-usuario-prueba', 'usuario-1')
+        .expect(200);
+      expect(actual.body.nombre).toBe(empresa.nombre);
+      expect(actual.body.porcentajeIva).toBe('15');
+    },
+  );
+
+  it('separa configuracion por empresa y rechaza estado, ids, roles y otros campos ajenos al formulario', async () => {
+    const propia = await crearEmpresa();
+    const ajena = await crearEmpresa('usuario-2');
+    const http = request(app.getHttpServer());
+    for (const campo of [
+      'id',
+      'empresaId',
+      'estado',
+      'planId',
+      'rolId',
+      'creadoEn',
+      'usuarios',
+    ])
+      await http
+        .patch('/empresas/actual/configuracion')
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ nombre: 'No guardar', [campo]: ajena.id })
+        .expect(400);
+    await http
+      .patch('/empresas/actual/configuracion')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ nombre: 'Propia editada', porcentajeIva: '0' })
+      .expect(200);
+    const otra = await http
+      .get('/empresas/actual')
+      .set('x-usuario-prueba', 'usuario-2')
+      .expect(200);
+    expect(otra.body).toMatchObject({
+      id: ajena.id,
+      nombre: ajena.nombre,
+      porcentajeIva: '15',
+    });
+    expect(
+      fixture.estado().empresas.find((e) => e.id === propia.id)!.nombre,
+    ).toBe('Propia editada');
+  });
+
+  it('valida campos de configuracion e IVA sin actualizar datos parcialmente ante entradas invalidas', async () => {
+    await crearEmpresa();
+    const antes = JSON.stringify(fixture.estado().empresas);
+    const invalidos = [
+      {},
+      { nombre: null },
+      { nombre: '  ' },
+      { nombre: 'x'.repeat(101) },
+      { direccion: null },
+      { direccion: '' },
+      { direccion: 'x'.repeat(256) },
+      { ruc: 1 },
+      { ruc: '' },
+      { ruc: 'x'.repeat(21) },
+      { telefono: false },
+      { telefono: 'x'.repeat(21) },
+      { correo: 'incorrecto' },
+      { correo: '' },
+      { correo: 'x'.repeat(90) + '@example.com' },
+      { devolucionesHabilitadas: null },
+      ...[
+        -1,
+        15,
+        null,
+        '-1',
+        '100.01',
+        '101',
+        '1.001',
+        '1e1',
+        'NaN',
+        '1\n',
+      ].map((porcentajeIva) => ({ nombre: 'No guardar', porcentajeIva })),
+    ];
+    for (const body of invalidos)
+      await request(app.getHttpServer())
+        .patch('/empresas/actual/configuracion')
+        .set('x-usuario-prueba', 'usuario-1')
+        .send(body)
+        .expect(400);
+    expect(JSON.stringify(fixture.estado().empresas)).toBe(antes);
+    for (const porcentajeIva of ['0', '100', '100.00'])
+      await request(app.getHttpServer())
+        .patch('/empresas/actual/configuracion')
+        .set('x-usuario-prueba', 'usuario-1')
+        .send({ porcentajeIva })
+        .expect(200);
+  });
+
+  it('aplica IVA actualizado a nuevas ventas y conserva los importes de ventas anteriores', async () => {
+    const { venta } = await prepararVenta();
+    const http = request(app.getHttpServer());
+    const primera = await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(venta)
+      .expect(201);
+    expect(primera.body).toMatchObject({
+      subtotal: '251',
+      montoIVA: '37.65',
+      total: '288.65',
+    });
+    await http
+      .patch('/empresas/actual/configuracion')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send({ porcentajeIva: '5' })
+      .expect(200);
+    const segunda = await http
+      .post('/ventas')
+      .set('x-usuario-prueba', 'usuario-1')
+      .send(venta)
+      .expect(201);
+    expect(segunda.body).toMatchObject({
+      subtotal: '251',
+      montoIVA: '12.55',
+      total: '263.55',
+    });
+    const anterior = await http
+      .get('/ventas/' + primera.body.id)
+      .set('x-usuario-prueba', 'usuario-1')
+      .expect(200);
+    expect(anterior.body).toMatchObject({
+      subtotal: '251',
+      montoIVA: '37.65',
+      total: '288.65',
+    });
+    expect(anterior.body.detalles).toEqual(primera.body.detalles);
+  });
+
   async function prepararDevolucion(
     usuario = 'usuario-1',
     metodoPago = 'EFECTIVO',
@@ -3918,7 +4135,7 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
       { devolucionesHabilitadas: null },
       { devolucionesHabilitadas: 'true' },
       { devolucionesHabilitadas: true, empresaId: ajena.empresa.id },
-      { devolucionesHabilitadas: true, porcentajeIva: '0' },
+      { devolucionesHabilitadas: true, porcentajeIva: '100.01' },
     ])
       await http
         .patch('/empresas/actual/configuracion')
@@ -6194,13 +6411,11 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
     const tx = vi
       .spyOn(fixture.db, '$transaction')
       .mockImplementationOnce(async () => {
-        fixture
-          .estado()
-          .usuarios.push({
-            ...fixture.estado().usuarios[0],
-            id: 'alta-concurrente',
-            rolId: empresa.roles.find((r: Row) => r.nombre === 'CAJERO').id,
-          });
+        fixture.estado().usuarios.push({
+          ...fixture.estado().usuarios[0],
+          id: 'alta-concurrente',
+          rolId: empresa.roles.find((r: Row) => r.nombre === 'CAJERO').id,
+        });
         throw new Prisma.PrismaClientKnownRequestError('Conflicto', {
           code: 'P2034',
           clientVersion: '7',
