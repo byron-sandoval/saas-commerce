@@ -10,6 +10,8 @@ import { RolesService } from '../roles/roles.service.js';
 import type { CreateEmpresaDto } from './dto/create-empresa.dto.js';
 import type { ConfiguracionEmpresaDto } from './dto/configuracion-empresa.dto.js';
 import { Prisma } from '../../generated/prisma/client.js';
+import { randomUUID } from 'node:crypto';
+import { contextoRls } from '../../prisma/contexto-rls.js';
 
 @Injectable()
 export class EmpresasService {
@@ -19,66 +21,71 @@ export class EmpresasService {
   ) {}
 
   async create(usuarioId: string, dto: CreateEmpresaDto) {
-    return this.prisma.$transaction(async (tx) => {
-      const usuario = await tx.usuario.findUnique({
-        where: { id: usuarioId },
-        select: {
-          activo: true,
-          debeCambiarPassword: true,
-          empresaId: true,
-          rolId: true,
-          superAdmin: { select: { id: true } },
-        },
-      });
-      if (
-        !usuario?.activo ||
-        usuario.debeCambiarPassword ||
-        usuario.superAdmin
-      ) {
-        throw new ForbiddenException(
-          'Esta cuenta no puede registrar una ferreteria.',
-        );
-      }
-      if (usuario.empresaId || usuario.rolId) {
-        throw new ConflictException('El usuario ya pertenece a una empresa.');
-      }
+    const empresaId = randomUUID();
+    return contextoRls.run({ usuarioId, empresaId }, () =>
+      this.prisma.$transaction(async (tx) => {
+        const usuario = await tx.usuario.findUnique({
+          where: { id: usuarioId },
+          select: {
+            activo: true,
+            debeCambiarPassword: true,
+            empresaId: true,
+            rolId: true,
+            superAdmin: { select: { id: true } },
+          },
+        });
+        if (
+          !usuario?.activo ||
+          usuario.debeCambiarPassword ||
+          usuario.superAdmin
+        ) {
+          throw new ForbiddenException(
+            'Esta cuenta no puede registrar una ferreteria.',
+          );
+        }
+        if (usuario.empresaId || usuario.rolId) {
+          throw new ConflictException('El usuario ya pertenece a una empresa.');
+        }
 
-      const empresa = await tx.empresa.create({
-        data: {
-          nombre: dto.nombre,
-          direccion: dto.direccion,
-          ruc: dto.ruc,
-          telefono: dto.telefono,
-          correo: dto.correo,
-        },
-      });
-      await this.rolesService.crearRolesIniciales(empresa.id, tx);
-      const roles = await tx.rol.findMany({
-        where: { empresaId: empresa.id },
-        select: { id: true, nombre: true, activo: true },
-      });
-      const admin = roles.find((rol) => rol.nombre === 'ADMIN' && rol.activo);
-      if (!admin) throw new ConflictException('No se pudo crear el rol ADMIN.');
+        const empresa = await tx.empresa.create({
+          data: {
+            id: empresaId,
+            nombre: dto.nombre,
+            direccion: dto.direccion,
+            ruc: dto.ruc,
+            telefono: dto.telefono,
+            correo: dto.correo,
+          },
+        });
+        await this.rolesService.crearRolesIniciales(empresa.id, tx);
+        const roles = await tx.rol.findMany({
+          where: { empresaId: empresa.id },
+          select: { id: true, nombre: true, activo: true },
+        });
+        const admin = roles.find((rol) => rol.nombre === 'ADMIN' && rol.activo);
+        if (!admin)
+          throw new ConflictException('No se pudo crear el rol ADMIN.');
 
-      // La condicion se comprueba de nuevo bajo el bloqueo de la actualizacion.
-      // Si hay dos altas simultaneas, la que pierde revierte toda su empresa.
-      const resultado = await tx.usuario.updateMany({
-        where: {
-          id: usuarioId,
-          empresaId: null,
-          rolId: null,
-          activo: true,
-          debeCambiarPassword: false,
-        },
-        data: { empresaId: empresa.id, rolId: admin.id },
-      });
-      if (resultado.count !== 1) {
-        throw new ConflictException(
-          'El usuario ya fue vinculado o su estado cambio.',
-        );
-      }
-      return { ...empresa, roles };
-    });
+        // La condicion se comprueba de nuevo bajo el bloqueo de la actualizacion.
+        // Si hay dos altas simultaneas, la que pierde revierte toda su empresa.
+        const resultado = await tx.usuario.updateMany({
+          where: {
+            id: usuarioId,
+            empresaId: null,
+            rolId: null,
+            activo: true,
+            debeCambiarPassword: false,
+          },
+          data: { empresaId: empresa.id, rolId: admin.id },
+        });
+        if (resultado.count !== 1) {
+          throw new ConflictException(
+            'El usuario ya fue vinculado o su estado cambio.',
+          );
+        }
+        return { ...empresa, roles };
+      }),
+    );
   }
 
   async findActual(empresaId: string) {
