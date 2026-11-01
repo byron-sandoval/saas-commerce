@@ -7,6 +7,7 @@ import type { AuthService } from '../auth/auth.service.js';
 import { CatalogoController } from '../catalogo/catalogo.controller.js';
 import { Roles } from './roles.decorator.js';
 import { RolesGuard } from './roles.guard.js';
+import { CONTEXTO_RLS } from '../../prisma/contexto-rls.js';
 
 describe('Permisos de catalogo', () => {
   const usuarioActivo = () => ({
@@ -43,6 +44,19 @@ describe('Permisos de catalogo', () => {
       prueba.guard.canActivate(prueba.context),
     ).rejects.toBeInstanceOf(UnauthorizedException);
     expect(prueba.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('obtiene el contexto RLS de la identidad validada e ignora empresa enviada en cabeceras', async () => {
+    const prueba = preparar();
+    Object.assign(prueba.solicitud.headers, {
+      'x-empresa-id': 'empresa-ajena',
+    });
+    Object.assign(prueba.solicitud, { body: { empresaId: 'empresa-ajena' } });
+    await prueba.guard.canActivate(prueba.context);
+    expect(Reflect.get(prueba.solicitud, CONTEXTO_RLS)).toEqual({
+      usuarioId: 'usuario-1',
+      empresaId: 'empresa-1',
+    });
   });
 
   it.each(['ADMIN', 'BODEGUERO', 'CAJERO'])(

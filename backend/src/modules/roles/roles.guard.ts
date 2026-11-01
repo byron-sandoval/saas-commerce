@@ -7,12 +7,15 @@ import type { CanActivate, ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { fromNodeHeaders } from 'better-auth/node';
 import type { Request } from 'express';
-import { PrismaService } from '../../prisma/prisma.service.js';
+import { AuthPrismaService } from '../../prisma/auth-prisma.service.js';
+import { CONTEXTO_RLS } from '../../prisma/contexto-rls.js';
+import type { ContextoRls } from '../../prisma/contexto-rls.js';
 import { AuthService } from '../auth/auth.service.js';
 import type { NombreRolInicial } from './roles.constants.js';
 import { ROLES_PERMITIDOS } from './roles.decorator.js';
 
 export type SolicitudConUsuario = Request & {
+  [CONTEXTO_RLS]?: ContextoRls;
   usuario?: { id: string; empresaId: string; rolId: string; rol: string };
 };
 
@@ -21,7 +24,7 @@ export class RolesGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
     private readonly authService: AuthService,
-    private readonly prisma: PrismaService,
+    private readonly prisma: AuthPrismaService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -82,6 +85,10 @@ export class RolesGuard implements CanActivate {
       empresaId: usuario.empresaId,
       rolId: usuario.rolId,
       rol: rol.nombre,
+    };
+    request[CONTEXTO_RLS] = {
+      usuarioId: usuario.id,
+      empresaId: usuario.empresaId,
     };
     return true;
   }
