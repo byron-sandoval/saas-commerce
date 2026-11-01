@@ -8,6 +8,7 @@ import type { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { AppModule } from '../src/app.module.js';
 import { PrismaService } from '../src/prisma/prisma.service.js';
+import { AuthPrismaService } from '../src/prisma/auth-prisma.service.js';
 import { AuthService } from '../src/modules/auth/auth.service.js';
 import { Prisma } from '../src/generated/prisma/client.js';
 import { hashPassword, verifyPassword } from 'better-auth/crypto';
@@ -846,6 +847,8 @@ describe('Empresa y productos: HTTP sin escrituras en Neon', () => {
     fixture = baseSimulada();
     const module = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(PrismaService)
+      .useValue(fixture.db)
+      .overrideProvider(AuthPrismaService)
       .useValue(fixture.db)
       .overrideProvider(AuthService)
       .useValue({
