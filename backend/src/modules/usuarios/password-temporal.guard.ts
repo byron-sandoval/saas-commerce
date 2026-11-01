@@ -7,15 +7,20 @@ import type { CanActivate, ExecutionContext } from '@nestjs/common';
 import type { Request } from 'express';
 import { fromNodeHeaders } from 'better-auth/node';
 import { AuthService } from '../auth/auth.service.js';
-import { PrismaService } from '../../prisma/prisma.service.js';
+import { AuthPrismaService } from '../../prisma/auth-prisma.service.js';
+import { CONTEXTO_RLS } from '../../prisma/contexto-rls.js';
+import type { ContextoRls } from '../../prisma/contexto-rls.js';
 
-export type SolicitudPasswordTemporal = Request & { empleadoId: string };
+export type SolicitudPasswordTemporal = Request & {
+  empleadoId: string;
+  [CONTEXTO_RLS]?: ContextoRls;
+};
 
 @Injectable()
 export class PasswordTemporalGuard implements CanActivate {
   constructor(
     private readonly auth: AuthService,
-    private readonly prisma: PrismaService,
+    private readonly prisma: AuthPrismaService,
   ) {}
   async canActivate(context: ExecutionContext) {
     const request = context
@@ -41,6 +46,10 @@ export class PasswordTemporalGuard implements CanActivate {
         'La cuenta no admite cambio de password temporal.',
       );
     request.empleadoId = usuario.id;
+    request[CONTEXTO_RLS] = {
+      usuarioId: usuario.id,
+      empresaId: usuario.empresaId,
+    };
     return true;
   }
 }
