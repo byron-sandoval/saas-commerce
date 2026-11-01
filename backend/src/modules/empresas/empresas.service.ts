@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
@@ -8,6 +9,7 @@ import { PrismaService } from '../../prisma/prisma.service.js';
 import { RolesService } from '../roles/roles.service.js';
 import type { CreateEmpresaDto } from './dto/create-empresa.dto.js';
 import type { ConfiguracionEmpresaDto } from './dto/configuracion-empresa.dto.js';
+import { Prisma } from '../../generated/prisma/client.js';
 
 @Injectable()
 export class EmpresasService {
@@ -88,12 +90,41 @@ export class EmpresasService {
   }
 
   async configurar(empresaId: string, dto: ConfiguracionEmpresaDto) {
-    const resultado = await this.prisma.empresa.updateMany({
-      where: { id: empresaId },
-      data: { devolucionesHabilitadas: dto.devolucionesHabilitadas },
-    });
-    if (resultado.count !== 1)
-      throw new NotFoundException('Empresa no encontrada.');
-    return this.findActual(empresaId);
+    if (!Object.values(dto).some((value) => value !== undefined))
+      throw new BadRequestException(
+        'Debes indicar al menos un dato para actualizar.',
+      );
+    const porcentajeIva =
+      dto.porcentajeIva === undefined
+        ? undefined
+        : new Prisma.Decimal(dto.porcentajeIva);
+    if (
+      porcentajeIva &&
+      (!porcentajeIva.isFinite() ||
+        porcentajeIva.isNegative() ||
+        porcentajeIva.greaterThan(100))
+    )
+      throw new BadRequestException('El IVA debe estar entre 0 y 100.');
+    try {
+      return await this.prisma.empresa.update({
+        where: { id: empresaId },
+        data: {
+          nombre: dto.nombre,
+          direccion: dto.direccion,
+          ruc: dto.ruc,
+          telefono: dto.telefono,
+          correo: dto.correo,
+          porcentajeIva,
+          devolucionesHabilitadas: dto.devolucionesHabilitadas,
+        },
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2025'
+      )
+        throw new NotFoundException('Empresa no encontrada.');
+      throw error;
+    }
   }
 }
