@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import type { Auth, BetterAuthOptions } from 'better-auth';
 import { betterAuth } from 'better-auth/minimal';
-import { PrismaService } from '../../prisma/prisma.service.js';
 import { createAuthOptions } from './auth.config.js';
+import { AuthPrismaService } from '../../prisma/auth-prisma.service.js';
 import type { Prisma } from '../../generated/prisma/client.js';
 import { BadRequestException } from '@nestjs/common';
 
@@ -10,7 +10,7 @@ import { BadRequestException } from '@nestjs/common';
 export class AuthService {
   readonly auth: Auth<BetterAuthOptions>;
 
-  constructor(prisma: PrismaService) {
+  constructor(prisma: AuthPrismaService) {
     this.auth = betterAuth(createAuthOptions(prisma));
   }
 

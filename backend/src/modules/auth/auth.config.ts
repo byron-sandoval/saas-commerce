@@ -2,11 +2,12 @@ import { prismaAdapter } from '@better-auth/prisma-adapter';
 import type { BetterAuthOptions } from 'better-auth';
 import { username } from 'better-auth/plugins/username';
 import type { PrismaService } from '../../prisma/prisma.service.js';
+import type { AuthPrismaService } from '../../prisma/auth-prisma.service.js';
 import type { Prisma } from '../../generated/prisma/client.js';
 import { APIError } from 'better-auth/api';
 
 export function createAuthOptions(
-  prisma: PrismaService | Prisma.TransactionClient,
+  prisma: PrismaService | AuthPrismaService | Prisma.TransactionClient,
   transaction = true,
 ): BetterAuthOptions {
   const secret = process.env.BETTER_AUTH_SECRET;

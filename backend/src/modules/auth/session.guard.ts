@@ -6,10 +6,13 @@ import {
 import type { CanActivate, ExecutionContext } from '@nestjs/common';
 import { fromNodeHeaders } from 'better-auth/node';
 import type { Request } from 'express';
-import { PrismaService } from '../../prisma/prisma.service.js';
+import { AuthPrismaService } from '../../prisma/auth-prisma.service.js';
+import { CONTEXTO_RLS } from '../../prisma/contexto-rls.js';
+import type { ContextoRls } from '../../prisma/contexto-rls.js';
 import { AuthService } from './auth.service.js';
 
 export type SolicitudConSesion = Request & {
+  [CONTEXTO_RLS]?: ContextoRls;
   usuarioAutenticado: { id: string };
 };
 
@@ -18,7 +21,7 @@ export type SolicitudConSesion = Request & {
 export class SessionGuard implements CanActivate {
   constructor(
     private readonly authService: AuthService,
-    private readonly prisma: PrismaService,
+    private readonly prisma: AuthPrismaService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -30,7 +33,12 @@ export class SessionGuard implements CanActivate {
 
     const usuario = await this.prisma.usuario.findUnique({
       where: { id: session.user.id },
-      select: { id: true, activo: true, debeCambiarPassword: true },
+      select: {
+        id: true,
+        activo: true,
+        debeCambiarPassword: true,
+        empresaId: true,
+      },
     });
     if (!usuario?.activo || usuario.debeCambiarPassword) {
       throw new ForbiddenException(
@@ -38,6 +46,10 @@ export class SessionGuard implements CanActivate {
       );
     }
     request.usuarioAutenticado = { id: usuario.id };
+    request[CONTEXTO_RLS] = {
+      usuarioId: usuario.id,
+      empresaId: usuario.empresaId,
+    };
     return true;
   }
 }
