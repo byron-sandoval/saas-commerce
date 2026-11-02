@@ -189,17 +189,17 @@ export function AdminShell({
           </div>
           <div className={styles.headerRight}>
             <details ref={userMenu} className={styles.userMenu}>
-              <summary className={styles.profile}>
+              <summary className={styles.profile} aria-label="Mi perfil">
                 <span className={styles.avatar}>{initials || "A"}</span>
                 <span className={styles.profileText}>
-                  <strong>{contexto.usuario.nombre}</strong>
+                  <strong>Mi perfil</strong>
                   <small>Administrador</small>
                 </span>
                 <Icon name="down" size={14} />
               </summary>
               <div className={styles.profileDropdown}>
                 <strong>{contexto.usuario.nombre}</strong>
-                <p>{contexto.empresa?.nombre}</p>
+                <p>{contexto.usuario.email}</p>
                 <LogoutButton />
               </div>
             </details>
@@ -208,12 +208,6 @@ export function AdminShell({
         <main id="contenido-principal" tabIndex={-1} className={styles.content}>
           {children}
         </main>
-        <footer className={styles.pageFooter}>
-          <span>
-            FerreSaaS <span>·</span> Tu ferretería en la nube
-          </span>
-          <span>Panel de administración</span>
-        </footer>
       </div>
     </div>
   );

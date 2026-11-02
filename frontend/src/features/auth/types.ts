@@ -23,7 +23,7 @@ export type Acceso =
   | "CAMBIAR_PASSWORD"
   | "SUPERADMIN";
 export interface ContextoAcceso {
-  usuario: { id: string; nombre: string };
+  usuario: { id: string; nombre: string; email: string };
   acceso: Acceso;
   empresa: { id: string; nombre: string } | null;
 }

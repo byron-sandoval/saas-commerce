@@ -292,6 +292,8 @@
   border-radius: 10px;
   padding: 18px;
   min-width: 240px;
+  max-width: calc(100vw - 40px);
+  overflow-wrap: anywhere;
   box-shadow: 0 12px 35px #11203315;
 }
 .profileDropdown > strong {
@@ -302,6 +304,14 @@
   color: #6e7d90;
   margin: 4px 0 18px;
 }
+.profileDropdown button {
+  padding: 7px 11px;
+  font-size: 11px;
+  color: #c03434;
+}
+.profileDropdown button:hover {
+  background: #fff5f5;
+}
 .content {
   padding: 29px 30px 22px;
   width: 100%;
@@ -309,20 +319,6 @@
   margin: 0 auto;
   flex: 1;
   outline: none;
-}
-.pageFooter {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  color: #8f9aab;
-  font-size: 10px;
-  margin: 0 30px;
-  border-top: 1px solid #e5eaf2;
-  padding: 18px 0;
-}
-.pageFooter span span {
-  padding: 0 5px;
-  color: #bec7d2;
 }
 .menuToggle,
 .closeMenu {
@@ -419,9 +415,6 @@
   .mobileSidebar .brand {
     padding-top: 38px;
   }
-  .pageFooter {
-    margin: 0 20px;
-  }
   .skipLink {
     left: 15px;
   }
@@ -435,13 +428,6 @@
   }
   .content {
     padding: 22px 16px;
-  }
-  .pageFooter {
-    margin: 0 16px;
-    font-size: 9px;
-  }
-  .pageFooter > span:last-child {
-    display: none;
   }
 }
 @media (prefers-reduced-motion: reduce) {
