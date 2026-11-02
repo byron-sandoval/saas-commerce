@@ -60,6 +60,11 @@ La primera devuelve el estado de Better Auth y la segunda `null` sin sesion.
 `/api/backend/empresas/actual` debe responder 401 sin iniciar sesion.
 ## Acceso
 
+- `/`: landing publica de FerreSaaS. Su contenido esta en `src/features/landing`.
+  Incluye herramientas, perfiles, pasos de inicio y preguntas frecuentes.
+  La vista del panel usa datos ilustrativos, identificados como ejemplo.
+  "Registrar mi ferreteria" lleva a una seccion de proxima disponibilidad;
+  no envia formularios ni crea cuentas. "Iniciar sesion" abre el login existente.
 - `/iniciar-sesion`: correo o username y password, errores y estado de envio.
 - `/inicio`: estructura del Dashboard protegida para ADMIN, con indicadores y tablas
   pendientes de conectar a datos reales.
