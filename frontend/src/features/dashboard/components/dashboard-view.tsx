@@ -2,6 +2,8 @@ import Link from "next/link";
 import { Icon } from "@/components/ui/icon";
 import type { IconName } from "@/components/ui/icon";
 import styles from "./dashboard.module.css";
+import { DashboardCalendar, type CalendarDate } from "./dashboard-calendar";
+import { SalesChart } from "./sales-chart";
 
 const indicators: {
   label: string;
@@ -35,21 +37,22 @@ const indicators: {
   },
 ];
 
-export function DashboardView() {
+export function DashboardView({
+  nombreUsuario,
+  hoy,
+}: {
+  nombreUsuario: string;
+  hoy: CalendarDate;
+}) {
   return (
     <div className={styles.dashboard}>
       <div className={styles.pageHeading}>
         <div>
           <div className={styles.headingLine}>
-            <h1>Dashboard</h1>
-            <span className={styles.previewBadge}>Vista inicial</span>
+            <h1>👋 Bienvenido(a), {nombreUsuario}</h1>
           </div>
           <p>Resumen general de tu ferretería</p>
         </div>
-        <span className={styles.period}>
-          <Icon name="calendar" size={17} />
-          Últimos 30 días
-        </span>
       </div>
       <div className={styles.indicators}>
         {indicators.map((item) => (
@@ -69,64 +72,10 @@ export function DashboardView() {
           </section>
         ))}
       </div>
-      <div className={styles.previewNote}>
-        <Icon name="info" size={15} />
-        <p>
-          Esta es la estructura de tu panel. Los indicadores y gráficos se
-          mostrarán al conectar el resumen de tu ferretería.
-        </p>
-      </div>
       <div className={styles.charts}>
-        <section className={styles.panel}>
-          <div className={styles.panelHeading}>
-            <div>
-              <h2>Ventas por día</h2>
-              <p>La evolución de tu negocio, de un vistazo</p>
-            </div>
-            <span className={styles.panelTag}>Resumen de ventas</span>
-          </div>
-          <div className={styles.lineChart}>
-            <div className={styles.chartGrid} aria-hidden="true">
-              <span />
-              <span />
-              <span />
-              <span />
-              <span />
-            </div>
-            <div className={styles.chartEmpty}>
-              <span className={styles.emptyIcon}>
-                <Icon name="chart" size={25} />
-              </span>
-              <strong>Aquí verás tus ventas por día</strong>
-              <p>El gráfico se completará con tus ventas registradas.</p>
-            </div>
-          </div>
-        </section>
-        <section className={styles.panel}>
-          <div className={styles.panelHeading}>
-            <div>
-              <h2>Ventas por categoría</h2>
-              <p>Conoce qué mueve tu negocio</p>
-            </div>
-          </div>
-          <div className={styles.categoryChart}>
-            <div
-              className={styles.donut}
-              aria-label="Gráfico por categorías pendiente de datos"
-            >
-              <div>
-                <strong>—</strong>
-                <span>Total de ventas</span>
-              </div>
-            </div>
-            <div className={styles.categoryLegend}>
-              <span className={styles.legendDot} />
-              <div>
-                <strong>Tus categorías</strong>
-                <p>Distribución por conectar</p>
-              </div>
-            </div>
-          </div>
+        <SalesChart />
+        <section className={styles.panel} aria-label="Calendario">
+          <DashboardCalendar hoy={hoy} />
         </section>
       </div>
       <div className={styles.tables}>
@@ -169,55 +118,31 @@ export function DashboardView() {
           </div>
         </section>
         <section className={styles.panel}>
-          <div className={styles.tableHeading}>
-            <h2>
-              <span className={`${styles.smallIcon} ${styles.accent}`}>
-                <Icon name="cart" size={15} />
-              </span>
-              Últimas ventas
-            </h2>
-            <Link href="/ventas/historial">
-              Ver ventas <Icon name="arrow" size={13} />
-            </Link>
+          <div className={styles.panelHeading}>
+            <div>
+              <h2>Ventas por categoría</h2>
+              <p>Conoce qué mueve tu negocio</p>
+            </div>
           </div>
-          <div className={styles.tableScroll}>
-            <table>
-              <thead>
-                <tr>
-                  <th>N.º de venta</th>
-                  <th>Fecha</th>
-                  <th>Cliente</th>
-                  <th>Total</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td colSpan={4}>
-                    <div className={styles.tableEmpty}>
-                      <Icon name="clipboard" size={26} />
-                      <strong>Tu actividad más reciente</strong>
-                      <p>Las últimas ventas se mostrarán en este espacio.</p>
-                    </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+          <div className={styles.categoryChart}>
+            <div
+              className={styles.donut}
+              aria-label="Gráfico por categorías pendiente de datos"
+            >
+              <div>
+                <strong>—</strong>
+                <span>Total de ventas</span>
+              </div>
+            </div>
+            <div className={styles.categoryLegend}>
+              <span className={styles.legendDot} />
+              <div>
+                <strong>Tus categorías</strong>
+                <p>Distribución por conectar</p>
+              </div>
+            </div>
           </div>
         </section>
-      </div>
-      <div className={styles.quickAccess}>
-        <span className={styles.quickIcon}>
-          <Icon name="store" size={20} />
-        </span>
-        <div>
-          <strong>Todo listo para organizar tu ferretería</strong>
-          <p>
-            Explora las secciones del menú y conoce tu nuevo espacio de trabajo.
-          </p>
-        </div>
-        <Link href="/inventario/productos">
-          Ir a productos <Icon name="arrow" size={15} />
-        </Link>
       </div>
     </div>
   );
