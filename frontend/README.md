@@ -90,3 +90,7 @@ El menu lateral se organiza en grupos desplegables: Inventario, Ventas, Compras,
 Caja y Creditos; Dashboard, Usuarios, Reportes y Configuracion son accesos directos.
 Cada grupo contiene sus pantallas. El grupo de la ruta actual se abre al navegar y
 su opcion se resalta. Las rutas de la primera estructura redirigen a las nuevas.
+
+En escritorio, el boton de tres lineas junto a la marca alterna entre menu completo
+y barra de iconos. Pulsar un grupo desde la barra compacta expande sus opciones.
+En movil, el menu sigue abriendose sobre el contenido y puede cerrarse desde la marca.

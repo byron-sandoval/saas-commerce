@@ -20,6 +20,7 @@ export function AdminShell({
 }) {
   const pathname = usePathname();
   const [menuAbierto, setMenuAbierto] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const drawer = useRef<HTMLDivElement>(null);
   const menuButton = useRef<HTMLButtonElement>(null);
   const userMenu = useRef<HTMLDetailsElement>(null);
@@ -87,17 +88,40 @@ export function AdminShell({
     menuButton.current?.focus();
   }
 
-  const sidebar = (
+  const sidebar = (mobile = false) => (
     <>
-      <Link href="/inicio" className={styles.brand} onClick={closeDrawer}>
-        <span className={styles.brandIcon}>
-          <Icon name="tools" size={24} />
-        </span>
-        <span>
+      <div className={styles.brand}>
+        <button
+          type="button"
+          className={styles.brandIcon}
+          aria-label={
+            mobile
+              ? "Ocultar menú"
+              : sidebarCollapsed
+                ? "Expandir menú lateral"
+                : "Contraer menú lateral"
+          }
+          aria-expanded={mobile ? menuAbierto : !sidebarCollapsed}
+          title={
+            mobile
+              ? "Ocultar menú"
+              : sidebarCollapsed
+                ? "Expandir menú lateral"
+                : "Contraer menú lateral"
+          }
+          onClick={() =>
+            mobile
+              ? closeDrawer()
+              : setSidebarCollapsed((collapsed) => !collapsed)
+          }
+        >
+          <Icon name="menu" size={23} />
+        </button>
+        <Link href="/inicio" className={styles.brandLink} onClick={closeDrawer}>
           FerreSaaS<small>Tu ferretería en la nube</small>
-        </span>
-      </Link>
-      <div className={styles.company}>
+        </Link>
+      </div>
+      <div className={styles.company} title={contexto.empresa?.nombre}>
         <span className={styles.companyIcon}>
           <Icon name="store" size={19} />
         </span>
@@ -105,7 +129,12 @@ export function AdminShell({
         <Icon name="shield" size={14} />
       </div>
       <p className={styles.navLabel}>MI FERRETERÍA</p>
-      <SidebarNavigation key={pathname} onNavigate={closeDrawer} />
+      <SidebarNavigation
+        key={pathname}
+        onNavigate={closeDrawer}
+        compact={!mobile && sidebarCollapsed}
+        onExpand={() => setSidebarCollapsed(false)}
+      />
       <div className={styles.sidebarFooter}>
         <div className={styles.workspaceIcon}>
           <Icon name="shield" size={18} />
@@ -119,11 +148,13 @@ export function AdminShell({
   );
 
   return (
-    <div className={styles.shell}>
+    <div
+      className={`${styles.shell} ${sidebarCollapsed ? styles.sidebarCollapsed : ""}`}
+    >
       <a href="#contenido-principal" className={styles.skipLink}>
         Saltar al contenido
       </a>
-      <aside className={styles.sidebar}>{sidebar}</aside>
+      <aside className={styles.sidebar}>{sidebar()}</aside>
       {menuAbierto && (
         <div className={styles.mobileBackdrop} onClick={closeDrawer}>
           <div
@@ -142,7 +173,7 @@ export function AdminShell({
             >
               <Icon name="close" />
             </button>
-            {sidebar}
+            {sidebar(true)}
           </div>
         </div>
       )}
