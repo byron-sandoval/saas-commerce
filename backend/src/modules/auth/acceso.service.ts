@@ -25,6 +25,7 @@ export class AccesoService {
       select: {
         id: true,
         nombre: true,
+        email: true,
         activo: true,
         empresaId: true,
         rolId: true,
@@ -37,7 +38,9 @@ export class AccesoService {
     });
     if (!usuario?.activo)
       throw new ForbiddenException('La cuenta no esta habilitada.');
-    const perfil = { usuario: { id: usuario.id, nombre: usuario.nombre } };
+    const perfil = {
+      usuario: { id: usuario.id, nombre: usuario.nombre, email: usuario.email },
+    };
     // La plataforma no concede acceso automatico a una ferreteria.
     if (usuario.superAdmin)
       return { ...perfil, acceso: 'SUPERADMIN', empresa: null };

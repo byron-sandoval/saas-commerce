@@ -7,6 +7,7 @@ function escenario() {
   const usuario = {
     id: 'u1',
     nombre: 'Usuario',
+    email: 'usuario@example.com',
     activo: true,
     empresaId: 'e1',
     rolId: 'r1',
@@ -40,7 +41,7 @@ describe('Contexto de acceso', () => {
       const s = escenario();
       s.usuario.rol.nombre = rol;
       await expect(s.servicio.consultar({})).resolves.toEqual({
-        usuario: { id: 'u1', nombre: 'Usuario' },
+        usuario: { id: 'u1', nombre: 'Usuario', email: 'usuario@example.com' },
         acceso: rol,
         empresa: { id: 'e1', nombre: 'Ferreteria' },
       });
