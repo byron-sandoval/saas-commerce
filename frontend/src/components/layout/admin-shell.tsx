@@ -7,7 +7,6 @@ import { usePathname } from "next/navigation";
 import type { ContextoAcceso } from "@/features/auth/types";
 import { LogoutButton } from "@/features/auth/components/logout-button";
 import { Icon } from "@/components/ui/icon";
-import { navigation } from "./navigation";
 import { SidebarNavigation } from "./sidebar-navigation";
 import styles from "./admin-shell.module.css";
 
@@ -24,7 +23,6 @@ export function AdminShell({
   const drawer = useRef<HTMLDivElement>(null);
   const menuButton = useRef<HTMLButtonElement>(null);
   const userMenu = useRef<HTMLDetailsElement>(null);
-  const active = navigation.find((item) => pathname === item.href);
   const initials = contexto.usuario.nombre
     .trim()
     .split(/\s+/)
@@ -117,16 +115,14 @@ export function AdminShell({
         >
           <Icon name="menu" size={23} />
         </button>
-        <Link href="/inicio" className={styles.brandLink} onClick={closeDrawer}>
-          FerreSaaS<small>Tu ferretería en la nube</small>
+        <Link
+          href="/inicio"
+          className={styles.brandLink}
+          title={contexto.empresa?.nombre}
+          onClick={closeDrawer}
+        >
+          {contexto.empresa?.nombre}
         </Link>
-      </div>
-      <div className={styles.company} title={contexto.empresa?.nombre}>
-        <span className={styles.companyIcon}>
-          <Icon name="store" size={19} />
-        </span>
-        <span title={contexto.empresa?.nombre}>{contexto.empresa?.nombre}</span>
-        <Icon name="shield" size={14} />
       </div>
       <p className={styles.navLabel}>MI FERRETERÍA</p>
       <SidebarNavigation
@@ -190,15 +186,8 @@ export function AdminShell({
             >
               <Icon name="menu" />
             </button>
-            <span className={styles.breadcrumbRoot}>Mi ferretería</span>
-            <Icon name="chevron" size={13} />
-            <strong>{active?.label ?? "Panel de administración"}</strong>
           </div>
           <div className={styles.headerRight}>
-            <span className={styles.adminBadge}>
-              <span />
-              Administrador
-            </span>
             <details ref={userMenu} className={styles.userMenu}>
               <summary className={styles.profile}>
                 <span className={styles.avatar}>{initials || "A"}</span>

@@ -39,7 +39,6 @@ export function SidebarNavigation({
             >
               <Icon name={entry.icon} size={18} />
               <span>{entry.label}</span>
-              {pathname === entry.href && <span className={styles.activeDot} />}
             </Link>
           );
 
@@ -88,9 +87,6 @@ export function SidebarNavigation({
                     className={`${styles.submenuLink} ${pathname === item.href ? styles.submenuActive : ""}`}
                   >
                     <span>{item.label}</span>
-                    {pathname === item.href && (
-                      <span className={styles.activeDot} />
-                    )}
                   </Link>
                 </li>
               ))}
