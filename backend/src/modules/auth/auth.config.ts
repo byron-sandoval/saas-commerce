@@ -32,12 +32,27 @@ export function createAuthOptions(
     throw new Error('BETTER_AUTH_URL debe usar HTTPS en produccion.');
   }
 
+  const trustedOrigins = [url.origin];
+  const frontendUrl = process.env.FRONTEND_URL;
+  if (frontendUrl) {
+    const frontend = new URL(frontendUrl);
+    if (
+      !['http:', 'https:'].includes(frontend.protocol) ||
+      frontend.username || frontend.password ||
+      frontend.pathname !== '/' || frontend.search || frontend.hash ||
+      (process.env.NODE_ENV === 'production' && frontend.protocol !== 'https:')
+    ) {
+      throw new Error('FRONTEND_URL debe ser un origen HTTP/HTTPS sin credenciales ni rutas; HTTPS en produccion.');
+    }
+    trustedOrigins.push(frontend.origin);
+  }
+
   return {
     appName: 'SaaS Ferreterias',
     secret,
     baseURL,
     basePath: '/api/auth',
-    trustedOrigins: [url.origin],
+    trustedOrigins,
     database: prismaAdapter(prisma, {
       provider: 'postgresql',
       transaction,

@@ -15,10 +15,46 @@ describe('Integracion de Better Auth', () => {
       'secreto-ficticio-exclusivo-de-pruebas-123456789',
     );
     vi.stubEnv('BETTER_AUTH_URL', 'http://localhost:3000');
+    vi.stubEnv('FRONTEND_URL', '');
     vi.stubEnv('NODE_ENV', 'test');
   });
 
   afterEach(() => vi.unstubAllEnvs());
+
+  it('acepta solicitudes del frontend configurado y rechaza origenes ajenos', async () => {
+    // Better Auth omite el control de origen bajo Vitest salvo configuracion explicita.
+    vi.stubEnv('BETTER_AUTH_URL', 'http://localhost:4000');
+    vi.stubEnv('FRONTEND_URL', 'http://localhost:3000');
+    const auth = betterAuth({
+      ...createAuthOptions(createPrismaMock() as unknown as PrismaService),
+      advanced: { disableOriginCheck: false, disableCSRFCheck: false },
+    });
+    for (const [origin, status] of [
+      ['http://localhost:3000', 200],
+      ['https://ajeno.example', 403],
+    ] as const) {
+      const response = await auth.handler(new Request('http://localhost:4000/api/auth/sign-out', {
+        method: 'POST',
+        headers: { Origin: origin, Cookie: 'comprobacion=1', 'Content-Type': 'application/json' },
+        body: '{}',
+      }));
+      expect(response.status).toBe(status);
+    }
+  });
+
+  it.each(['https://frontend.example/ruta', 'ftp://frontend.example', 'https://user:password@frontend.example', 'https://frontend.example?x=1'])(
+    'rechaza FRONTEND_URL invalido: %s', (origin) => {
+      vi.stubEnv('FRONTEND_URL', origin);
+      expect(() => createAuthOptions(createPrismaMock() as unknown as PrismaService)).toThrow('FRONTEND_URL');
+    },
+  );
+
+  it('exige HTTPS tambien en el frontend de produccion', () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('BETTER_AUTH_URL', 'https://api.example.com');
+    vi.stubEnv('FRONTEND_URL', 'http://app.example.com');
+    expect(() => createAuthOptions(createPrismaMock() as unknown as PrismaService)).toThrow('FRONTEND_URL');
+  });
 
   function createPrismaMock() {
     type Row = Record<string, any>;
